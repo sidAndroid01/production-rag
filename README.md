@@ -1,6 +1,6 @@
-# Production RAG — Phase 1: ingestion foundation
+# Production RAG — Phase 1 and Phase 2 foundations
 
-This repository is being built phase by phase. **Only the document-ingestion flow is published in this first phase.** Retrieval, embeddings, vector storage, generation, evaluation, deployment, and the remaining production controls will be added in later phases after this boundary is understood and tested.
+This repository is being built phase by phase. **The first two standalone foundations are now published: document ingestion and a deterministic query flow.** Embeddings, vector storage, hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
 
 ## What this phase does
 
@@ -89,17 +89,65 @@ for chunk in result.chunks:
 | Security | basic role-label sanitization | authn/authz, tenant isolation, PII and threat controls |
 | Operations | synchronous function | queues, retries, cancellation, metrics, tracing |
 
+## Phase 2: standalone query flow
+
+`query.py` consumes the immutable chunks returned by `rag.py` and runs the complete query-side contract:
+
+```text
+question + tenant ID
+  → validate length and injection policy
+  → filter chunks by tenant before scoring
+  → tokenize and score lexical cosine similarity
+  → select top-k candidates
+  → reject weak evidence with a minimum-score gate
+  → build a deterministic extractive answer
+  → return citations, grounding status, and request ID
+```
+
+The query component is intentionally self-contained. It has no HTTP server, database, embedding model, or LLM dependency. `ChunkLike` is a small structural interface, so `rag.Chunk` can be passed directly while a future database adapter can return the same fields.
+
+### Query example
+
+```python
+from query import RagQueryPipeline
+from rag import RagIngestionPipeline
+
+ingested = RagIngestionPipeline().ingest(
+    b"The refund window is thirty days.", "policy.txt", "default"
+)
+response = RagQueryPipeline(ingested.chunks).query(
+    "What is the refund window?", tenant_id="default"
+)
+print(response.answer)
+print(response.citations[0].source)
+```
+
+The answer is grounded only when at least one tenant-scoped chunk reaches `min_score`. Otherwise the component abstains with an explicit message and returns no citations. This is a deterministic baseline for learning and benchmarking; lexical overlap is not semantic understanding. Later phases replace `_retrieve()` with hybrid BM25/vector search and replace extractive generation with a model gateway plus citation verification.
+
+### Query contract and boundaries
+
+| Concern | Phase-two behavior | Deferred to a later phase |
+| --- | --- | --- |
+| Query input | trim, length limit, injection patterns | richer policy engine and moderation |
+| Security | tenant filter happens before ranking | authenticated identity and storage-enforced authorization |
+| Retrieval | term-frequency cosine similarity, top-k | BM25, embeddings, hybrid search, reranking, metadata filters |
+| Evidence gate | configurable `min_score` | calibrated threshold and evaluation-driven policy |
+| Answer | deterministic extractive concatenation | LLM gateway, token budgets, grounded generation |
+| Citations | source, chunk index, score, excerpt | entailment verification and richer provenance |
+| Storage | chunks supplied in memory | persistent SQL/vector/search indexes |
+
 ## Phase plan
 
 The repository will grow in this order:
 
-1. **Phase 1 — ingestion foundation (this commit):** decode, sanitize, identify, normalize, and chunk.
-2. **Phase 2 — persistence and indexing:** durable document metadata, idempotency, embeddings, and a vector/keyword index.
-3. **Phase 3 — retrieval:** tenant filters, hybrid search, reranking, query transformation, and citations.
-4. **Phase 4 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
-5. **Phase 5 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
+1. **Phase 1 — ingestion foundation:** decode, sanitize, identify, normalize, and chunk.
+2. **Phase 2 — query foundation (this commit):** validate, retrieve, gate, answer, and cite.
+3. **Phase 3 — persistence and indexing:** durable metadata, idempotency, embeddings, and vector/keyword indexes.
+4. **Phase 4 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
+5. **Phase 5 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
+6. **Phase 6 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
 
-Only the first phase is intentionally present in this public repository snapshot. Each later phase will add a focused contract, tests, observability, and an updated README section when it is implemented.
+Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 
 ## Interview questions this phase should answer
 
@@ -109,6 +157,9 @@ Only the first phase is intentionally present in this public repository snapshot
 - Why prefer a word boundary? It improves semantic coherence, while the progress guard handles oversized tokens.
 - Why keep tenant ID on every chunk? Future retrieval authorization must filter before scoring and before returning evidence.
 - Why does this code not call an LLM? Ingestion should be deterministic, retryable, and independently testable; model calls belong behind later adapters.
+- Why filter by tenant before scoring? Authorization must constrain the candidate set before relevance ranking or evidence construction.
+- Why abstain? A fluent answer without sufficiently relevant evidence is a retrieval failure, so the contract makes uncertainty visible.
+- Why keep retrieval and generation separate? It lets us measure retrieval quality independently and swap a lexical baseline for embeddings or a model gateway.
 
 ## License
 
