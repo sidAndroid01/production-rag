@@ -1,6 +1,6 @@
-# Production RAG — Phase 1 and Phase 2 foundations
+# Production RAG — Phase 1, Phase 2, and Phase 3 foundations
 
-This repository is being built phase by phase. **The first two standalone foundations are now published: document ingestion and a deterministic query flow.** Embeddings, vector storage, hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
+This repository is being built phase by phase. **The first three standalone foundations are now published: document ingestion, a deterministic query flow, and an authenticated API boundary.** Embeddings, vector storage, hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
 
 ## What this phase does
 
@@ -136,16 +136,56 @@ The answer is grounded only when at least one tenant-scoped chunk reaches `min_s
 | Citations | source, chunk index, score, excerpt | entailment verification and richer provenance |
 | Storage | chunks supplied in memory | persistent SQL/vector/search indexes |
 
+## Phase 3: standalone API boundary
+
+`api.py` exposes the first two components through a small JSON HTTP contract. It uses Python's standard library so the request lifecycle is visible without hiding it behind a framework.
+
+```text
+HTTP request
+  → route and method check
+  → API-key authentication (except health probes)
+  → bounded JSON body
+  → ingestion or query pipeline
+  → consistent JSON response and request ID
+```
+
+Run it with:
+
+```bash
+python3 api.py
+```
+
+The phase-three API supports `GET /health/live`, `GET /health/ready`, `POST /v1/documents`, and `POST /v1/query`. Document requests use `{filename, tenant_id, content}` JSON, and query requests use `{question, tenant_id}` JSON. Send `x-api-key: local-development-key` for the two protected routes; set `RAG_API_KEY` to change it. The document content is held in memory and is lost when the process stops.
+
+Example requests:
+
+```bash
+curl http://127.0.0.1:8000/health/live
+
+curl -X POST http://127.0.0.1:8000/v1/documents \
+  -H 'content-type: application/json' \
+  -H 'x-api-key: local-development-key' \
+  -d '{"filename":"policy.txt","tenant_id":"default","content":"Refunds are available within thirty days."}'
+
+curl -X POST http://127.0.0.1:8000/v1/query \
+  -H 'content-type: application/json' \
+  -H 'x-api-key: local-development-key' \
+  -d '{"question":"How long is the refund window?","tenant_id":"default"}'
+```
+
+The API layer handles transport concerns only. It does not add durable storage, semantic retrieval, or LLM generation. Those remain explicit future phases.
+
 ## Phase plan
 
 The repository will grow in this order:
 
 1. **Phase 1 — ingestion foundation:** decode, sanitize, identify, normalize, and chunk.
 2. **Phase 2 — query foundation (this commit):** validate, retrieve, gate, answer, and cite.
-3. **Phase 3 — persistence and indexing:** durable metadata, idempotency, embeddings, and vector/keyword indexes.
-4. **Phase 4 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
-5. **Phase 5 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
-6. **Phase 6 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
+3. **Phase 3 — API boundary (this commit):** authenticated JSON routes, validation, health probes, and error mapping.
+4. **Phase 4 — persistence and indexing:** durable metadata, idempotency, embeddings, and vector/keyword indexes.
+5. **Phase 5 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
+6. **Phase 6 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
+7. **Phase 7 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 
@@ -160,6 +200,9 @@ Each phase adds a focused contract, tests, observability, and an updated README 
 - Why filter by tenant before scoring? Authorization must constrain the candidate set before relevance ranking or evidence construction.
 - Why abstain? A fluent answer without sufficiently relevant evidence is a retrieval failure, so the contract makes uncertainty visible.
 - Why keep retrieval and generation separate? It lets us measure retrieval quality independently and swap a lexical baseline for embeddings or a model gateway.
+- Why keep the API layer thin? Transport validation and authentication should be testable separately from ingestion and retrieval logic.
+- Why are health endpoints unauthenticated? Orchestrators need liveness and readiness probes before routing protected application traffic.
+- Why is the phase-three store in memory? It keeps the API contract runnable; persistence and restart behavior are deliberately deferred.
 
 ## License
 
