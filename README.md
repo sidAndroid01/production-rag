@@ -1,6 +1,6 @@
-# Production RAG — Phase 1, Phase 2, and Phase 3 foundations
+# Production RAG — Phase 1 through Phase 4 foundations
 
-This repository is being built phase by phase. **The first three standalone foundations are now published: document ingestion, a deterministic query flow, and an authenticated API boundary.** Embeddings, vector storage, hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
+This repository is being built phase by phase. **Four standalone foundations are now published: document ingestion, a deterministic query flow, an authenticated API boundary, and PostgreSQL persistence ready for pgvector embeddings.** Hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
 
 ## What this phase does
 
@@ -175,17 +175,70 @@ curl -X POST http://127.0.0.1:8000/v1/query \
 
 The API layer handles transport concerns only. It does not add durable storage, semantic retrieval, or LLM generation. Those remain explicit future phases.
 
+## Phase 4: PostgreSQL + pgvector persistence
+
+`persistence.py` is the durable repository boundary. It stores document metadata and chunks in PostgreSQL, enables the `vector` extension, and leaves an `embedding vector` column ready for the later embedding phase. The write path is transactional: a document and all of its chunks are committed together.
+
+```text
+IngestResult
+  → transaction begins
+  → document upsert keyed by tenant + content hash
+  → duplicate upload returns safely without new chunks
+  → chunks inserted with ordering and foreign keys
+  → indexes support tenant/document reads
+  → transaction commits
+```
+
+The schema is in [`schema.sql`](schema.sql), and [`docker-compose.persistence.yml`](docker-compose.persistence.yml) runs a local PostgreSQL 17 instance with the pgvector image and a named volume. Docker is only the repeatable local runtime; the volume keeps database files when the container restarts.
+
+Install the Python driver and start the database:
+
+```bash
+pip install "psycopg[binary]"
+docker compose -f docker-compose.persistence.yml up -d
+```
+
+Use the repository:
+
+```python
+from persistence import PostgresPersistence
+from rag import RagIngestionPipeline
+
+store = PostgresPersistence("postgresql://rag:rag-local-password@localhost:5432/rag")
+store.initialize()  # safe to run repeatedly
+result = RagIngestionPipeline().ingest(
+    b"Refunds are available within thirty days.", "policy.txt", "default"
+)
+print(store.persist(result))
+print(store.list_chunks("default"))
+```
+
+The current query baseline still ranks in memory. The next retrieval phase will adapt `list_chunks()` to SQL full-text search and later to `embedding <=> query_vector` with an HNSW index after an embedding model and dimension are selected. Keeping the embedding column nullable avoids pretending that a model has already been chosen.
+
+### Persistence contract and boundaries
+
+| Concern | Phase-four behavior | Deferred to a later phase |
+| --- | --- | --- |
+| Database | PostgreSQL with pgvector extension | managed hosting and high availability |
+| Atomicity | document and chunks in one transaction | job/outbox coordination for external embedding calls |
+| Idempotency | tenant + original content SHA-256 | explicit document versions and deletion workflows |
+| Tenant safety | tenant columns and scoped reads | database row-level security and application identity |
+| Vector field | nullable, dimension-unbounded `vector` | selected model dimension, HNSW/IVFFlat index, backfills |
+| Files | chunk text in PostgreSQL | object storage for original uploads |
+| Recovery | local named Docker volume | backups, point-in-time restore, replication, disaster recovery |
+
 ## Phase plan
 
 The repository will grow in this order:
 
 1. **Phase 1 — ingestion foundation:** decode, sanitize, identify, normalize, and chunk.
-2. **Phase 2 — query foundation (this commit):** validate, retrieve, gate, answer, and cite.
-3. **Phase 3 — API boundary (this commit):** authenticated JSON routes, validation, health probes, and error mapping.
-4. **Phase 4 — persistence and indexing:** durable metadata, idempotency, embeddings, and vector/keyword indexes.
-5. **Phase 5 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
-6. **Phase 6 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
-7. **Phase 7 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
+2. **Phase 2 — query foundation:** validate, retrieve, gate, answer, and cite.
+3. **Phase 3 — API boundary:** authenticated JSON routes, validation, health probes, and error mapping.
+4. **Phase 4 — PostgreSQL persistence (this commit):** durable metadata, transactional chunks, idempotency, and pgvector readiness.
+5. **Phase 5 — embeddings and vector retrieval:** model adapter, vector population, HNSW/IVFFlat, and SQL similarity search.
+6. **Phase 6 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
+7. **Phase 7 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
+8. **Phase 8 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 
@@ -203,6 +256,10 @@ Each phase adds a focused contract, tests, observability, and an updated README 
 - Why keep the API layer thin? Transport validation and authentication should be testable separately from ingestion and retrieval logic.
 - Why are health endpoints unauthenticated? Orchestrators need liveness and readiness probes before routing protected application traffic.
 - Why is the phase-three store in memory? It keeps the API contract runnable; persistence and restart behavior are deliberately deferred.
+- Why use PostgreSQL before a dedicated vector database? Documents, chunks, tenants, and jobs need relational constraints and transactions; pgvector lets us add similarity search without operating a second system.
+- Why is `embedding` nullable? Persistence can be built before choosing an embedding model; the dimension and index should match a measured model decision.
+- Why enforce uniqueness on tenant plus content hash? It makes retries and identical uploads idempotent within a tenant.
+- Why use a Docker volume? Containers are replaceable processes; the volume keeps database files across restarts and container recreation.
 
 ## License
 
