@@ -77,6 +77,13 @@ class PostgresPersistence:
             with connection.cursor() as cursor:
                 cursor.execute(SCHEMA_SQL)
 
+    def check_connection(self) -> None:
+        """Raise if PostgreSQL is unavailable; used by the readiness probe."""
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+
     def persist(self, result: Any) -> PersistResult:
         """Atomically upsert one ingestion result and its chunks.
 

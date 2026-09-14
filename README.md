@@ -1,6 +1,6 @@
 # Production RAG — Phase 1 through Phase 4 foundations
 
-This repository is being built phase by phase. **Four standalone foundations are now published: document ingestion, a deterministic query flow, an authenticated API boundary, and PostgreSQL persistence ready for pgvector embeddings.** Hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
+This repository is being built phase by phase. **Four standalone foundations are now published: document ingestion, a deterministic query flow, an authenticated API boundary, and PostgreSQL persistence ready for pgvector embeddings. The API can now use that persistence layer when configured.** Hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
 
 ## What this phase does
 
@@ -175,6 +175,20 @@ curl -X POST http://127.0.0.1:8000/v1/query \
 
 The API layer handles transport concerns only. It does not add durable storage, semantic retrieval, or LLM generation. Those remain explicit future phases.
 
+## Phase 5: API backed by PostgreSQL
+
+Set `DATABASE_URL` to switch the API from its in-memory fallback to PostgreSQL:
+
+```bash
+export DATABASE_URL='postgresql://rag:rag-local-password@localhost:5432/rag'
+pip install "psycopg[binary]"
+python3 api.py
+```
+
+At startup the API initializes the schema. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. Query requests load only the requested tenant's chunks from PostgreSQL before invoking `RagQueryPipeline`. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
+
+This phase proves the application boundary survives process restarts and separates transport from storage. It still performs lexical ranking in Python; vector similarity and an HNSW index come after the embedding model is selected.
+
 ## Phase 4: PostgreSQL + pgvector persistence
 
 `persistence.py` is the durable repository boundary. It stores document metadata and chunks in PostgreSQL, enables the `vector` extension, and leaves an `embedding vector` column ready for the later embedding phase. The write path is transactional: a document and all of its chunks are committed together.
@@ -234,11 +248,12 @@ The repository will grow in this order:
 1. **Phase 1 — ingestion foundation:** decode, sanitize, identify, normalize, and chunk.
 2. **Phase 2 — query foundation:** validate, retrieve, gate, answer, and cite.
 3. **Phase 3 — API boundary:** authenticated JSON routes, validation, health probes, and error mapping.
-4. **Phase 4 — PostgreSQL persistence (this commit):** durable metadata, transactional chunks, idempotency, and pgvector readiness.
-5. **Phase 5 — embeddings and vector retrieval:** model adapter, vector population, HNSW/IVFFlat, and SQL similarity search.
-6. **Phase 6 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
-7. **Phase 7 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
-8. **Phase 8 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
+4. **Phase 4 — PostgreSQL persistence:** durable metadata, transactional chunks, idempotency, and pgvector readiness.
+5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
+6. **Phase 6 — embeddings and vector retrieval:** model adapter, vector population, HNSW/IVFFlat, and SQL similarity search.
+7. **Phase 7 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
+8. **Phase 8 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
+9. **Phase 9 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 
@@ -260,6 +275,8 @@ Each phase adds a focused contract, tests, observability, and an updated README 
 - Why is `embedding` nullable? Persistence can be built before choosing an embedding model; the dimension and index should match a measured model decision.
 - Why enforce uniqueness on tenant plus content hash? It makes retries and identical uploads idempotent within a tenant.
 - Why use a Docker volume? Containers are replaceable processes; the volume keeps database files across restarts and container recreation.
+- Why keep an in-memory fallback? It makes the transport contract runnable without a database, while `DATABASE_URL` selects durable behavior explicitly.
+- What should readiness mean? Liveness means the process is running; readiness means required dependencies such as PostgreSQL can serve requests.
 
 ## License
 

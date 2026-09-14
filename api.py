@@ -13,9 +13,11 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from types import SimpleNamespace
 from uuid import uuid4
 
 from query import RagQueryPipeline, UnsafeQueryError
+from persistence import PostgresPersistence
 from rag import RagIngestionPipeline
 
 
@@ -29,10 +31,16 @@ class ApiError(Exception):
 class RagApiApplication:
     """Own request policy and in-memory state for the phase-three API."""
 
-    def __init__(self, api_key: str | None = None, max_body_bytes: int = 5_000_000) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_body_bytes: int = 5_000_000,
+        persistence: PostgresPersistence | None = None,
+    ) -> None:
         self.api_key = api_key or os.getenv("RAG_API_KEY", "local-development-key")
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
+        self.persistence = persistence
         self._chunks: list[Any] = []
         self._lock = threading.Lock()
 
@@ -56,6 +64,11 @@ class RagApiApplication:
         if path == "/health/live" and method == "GET":
             return HTTPStatus.OK, {"status": "ok", "request_id": request_id}
         if path == "/health/ready" and method == "GET":
+            if self.persistence is not None:
+                try:
+                    self.persistence.check_connection()
+                except Exception as exc:
+                    raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "database is unavailable") from exc
             return HTTPStatus.OK, {"status": "ready", "request_id": request_id}
         if method != "POST" or path not in {"/v1/documents", "/v1/query"}:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
@@ -75,12 +88,17 @@ class RagApiApplication:
                 result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
             except (UnicodeError, ValueError) as exc:
                 raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-            with self._lock:
-                self._chunks.extend(result.chunks)
+            if self.persistence is not None:
+                stored = self.persistence.persist(result)
+                chunks_created = stored.chunks_written
+            else:
+                with self._lock:
+                    self._chunks.extend(result.chunks)
+                chunks_created = len(result.chunks)
             return HTTPStatus.CREATED, {
                 "document_id": result.document_id,
                 "content_sha256": result.content_sha256,
-                "chunks_created": len(result.chunks),
+                "chunks_created": chunks_created,
                 "request_id": request_id,
             }
 
@@ -88,8 +106,25 @@ class RagApiApplication:
         tenant_id = payload.get("tenant_id")
         if not isinstance(question, str) or not isinstance(tenant_id, str):
             raise ApiError(HTTPStatus.BAD_REQUEST, "question and tenant_id are required strings")
-        with self._lock:
-            query = RagQueryPipeline(tuple(self._chunks))
+        if self.persistence is not None:
+            rows = self.persistence.list_chunks(tenant_id)
+            query = RagQueryPipeline(
+                tuple(
+                    SimpleNamespace(
+                        id=row["id"],
+                        tenant_id=row["tenant_id"],
+                        document_id=row["document_id"],
+                        index=row["chunk_index"],
+                        text=row["text"],
+                        created_at=row["created_at"],
+                        source=row["source"],
+                    )
+                    for row in rows
+                )
+            )
+        else:
+            with self._lock:
+                query = RagQueryPipeline(tuple(self._chunks))
         try:
             result = query.query(question, tenant_id, request_id=request_id)
         except UnsafeQueryError as exc:
@@ -145,6 +180,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def run() -> None:
     port = int(os.getenv("PORT", "8000"))
+    dsn = os.getenv("DATABASE_URL")
+    persistence = PostgresPersistence(dsn) if dsn else None
+    if persistence is not None:
+        persistence.initialize()
+    RequestHandler.application = RagApiApplication(persistence=persistence)
     server = ThreadingHTTPServer(("127.0.0.1", port), RequestHandler)
     print(f"RAG API listening on http://127.0.0.1:{port}")
     server.serve_forever()
