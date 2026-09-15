@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id TEXT NOT NULL,
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     text TEXT NOT NULL,
-    embedding vector,
+    embedding vector(384),
     embedding_model TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, document_id, chunk_index),
@@ -30,6 +30,13 @@ CREATE TABLE IF NOT EXISTS chunks (
         ON DELETE CASCADE
 );
 
+-- Upgrade databases created by earlier phases, where embedding was untyped.
+ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(384)
+    USING embedding::vector(384);
+
 CREATE INDEX IF NOT EXISTS chunks_tenant_document_index
     ON chunks (tenant_id, document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS documents_tenant_index ON documents (tenant_id);
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
+    ON chunks USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL;

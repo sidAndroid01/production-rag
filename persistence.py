@@ -7,10 +7,13 @@ machines that do not yet have Docker or PostgreSQL installed.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from embeddings import DIMENSIONS, MODEL_NAME
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -34,7 +37,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id TEXT NOT NULL,
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     text TEXT NOT NULL,
-    embedding vector,
+    embedding vector(384),
     embedding_model TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, document_id, chunk_index),
@@ -43,9 +46,16 @@ CREATE TABLE IF NOT EXISTS chunks (
         ON DELETE CASCADE
 );
 
+-- Upgrade databases created by earlier phases, where embedding was untyped.
+ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(384)
+    USING embedding::vector(384);
+
 CREATE INDEX IF NOT EXISTS chunks_tenant_document_index
     ON chunks (tenant_id, document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS documents_tenant_index ON documents (tenant_id);
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
+    ON chunks USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL;
 """
 
 
@@ -73,18 +83,21 @@ class PostgresPersistence:
 
     def initialize(self) -> None:
         """Create the extension, tables, and indexes in one transaction."""
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(SCHEMA_SQL)
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(SCHEMA_SQL)
 
     def check_connection(self) -> None:
         """Raise if PostgreSQL is unavailable; used by the readiness probe."""
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
 
-    def persist(self, result: Any) -> PersistResult:
+    def persist(
+        self,
+        result: Any,
+        embeddings: Sequence[Sequence[float]],
+        model_name: str = MODEL_NAME,
+    ) -> PersistResult:
         """Atomically upsert one ingestion result and its chunks.
 
         The method expects the ``IngestResult`` shape from ``rag.py``. A content
@@ -93,13 +106,24 @@ class PostgresPersistence:
         chunks = tuple(result.chunks)
         if not chunks:
             raise ValueError("cannot persist an ingestion result with no chunks")
+        if model_name != MODEL_NAME:
+            raise ValueError(f"database vectors must use the configured model {MODEL_NAME}")
+        if len(embeddings) != len(chunks):
+            raise ValueError("every chunk must have exactly one embedding")
+        normalized_embeddings: list[str] = []
+        for embedding in embeddings:
+            vector = [float(value) for value in embedding]
+            if len(vector) != DIMENSIONS:
+                raise ValueError(f"embeddings must have exactly {DIMENSIONS} dimensions")
+            if not all(math.isfinite(value) for value in vector):
+                raise ValueError("embeddings must contain only finite values")
+            normalized_embeddings.append("[" + ",".join(map(str, vector)) + "]")
         first = chunks[0]
         tenant_id = first.tenant_id
         source = first.source
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     INSERT INTO documents
                         (document_id, tenant_id, source, content_sha256, chunk_count)
                     VALUES (%s, %s, %s, %s, %s)
@@ -107,37 +131,75 @@ class PostgresPersistence:
                         SET updated_at = now()
                     RETURNING document_id, (xmax = 0) AS inserted
                     """,
-                    (result.document_id, tenant_id, source, result.content_sha256, len(chunks)),
-                )
-                document_id, inserted = cursor.fetchone()
-                if not inserted:
-                    return PersistResult(document_id, 0, True)
+                (result.document_id, tenant_id, source, result.content_sha256, len(chunks)),
+            )
+            document_id, inserted = cursor.fetchone()
+            if not inserted:
+                return PersistResult(document_id, 0, True)
 
-                cursor.executemany(
-                    """
+            cursor.executemany(
+                """
                     INSERT INTO chunks
-                        (id, tenant_id, document_id, chunk_index, text, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (id, tenant_id, document_id, chunk_index, text, embedding,
+                         embedding_model, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s)
                     ON CONFLICT (tenant_id, document_id, chunk_index) DO NOTHING
                     """,
+                (
                     (
-                        (
-                            chunk.id,
-                            chunk.tenant_id,
-                            document_id,
-                            chunk.index,
-                            chunk.text,
-                            chunk.created_at,
-                        )
-                        for chunk in chunks
-                    ),
-                )
-                cursor.execute(
-                    "UPDATE documents SET chunk_count = %s, updated_at = now() "
-                    "WHERE tenant_id = %s AND document_id = %s",
-                    (len(chunks), tenant_id, document_id),
-                )
+                        chunk.id,
+                        chunk.tenant_id,
+                        document_id,
+                        chunk.index,
+                        chunk.text,
+                        embedding,
+                        model_name,
+                        chunk.created_at,
+                    )
+                    for chunk, embedding in zip(chunks, normalized_embeddings, strict=True)
+                ),
+            )
+            cursor.execute(
+                "UPDATE documents SET chunk_count = %s, updated_at = now() "
+                "WHERE tenant_id = %s AND document_id = %s",
+                (len(chunks), tenant_id, document_id),
+            )
         return PersistResult(document_id, len(chunks), False)
+
+    def search_similar(
+        self,
+        tenant_id: str,
+        query_embedding: Sequence[float],
+        limit: int = 5,
+        model_name: str = MODEL_NAME,
+    ) -> list[dict[str, Any]]:
+        """Find nearest chunks, filtering tenant and model before returning evidence."""
+        vector = [float(value) for value in query_embedding]
+        if not tenant_id.strip():
+            raise ValueError("tenant_id is required")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if len(vector) != DIMENSIONS or not all(math.isfinite(value) for value in vector):
+            raise ValueError(f"query embedding must be a finite {DIMENSIONS}-dimension vector")
+        vector_literal = "[" + ",".join(map(str, vector)) + "]"
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                    SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
+                           c.created_at, d.source,
+                           1 - (c.embedding <=> %s::vector) AS score
+                    FROM chunks AS c
+                    JOIN documents AS d USING (tenant_id, document_id)
+                    WHERE c.tenant_id = %s
+                      AND c.embedding IS NOT NULL
+                      AND c.embedding_model = %s
+                    ORDER BY c.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                (vector_literal, tenant_id, model_name, vector_literal, limit),
+            )
+            columns = [column.name for column in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     def list_chunks(self, tenant_id: str, document_id: str | None = None) -> list[dict[str, Any]]:
         """Return ordered, tenant-scoped chunks for the query adapter."""
@@ -148,16 +210,15 @@ class PostgresPersistence:
         if document_id is not None:
             where += " AND document_id = %s"
             parameters.append(document_id)
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT id, tenant_id, document_id, chunk_index, text, created_at, "
-                    f"source FROM chunks JOIN documents USING (tenant_id, document_id) WHERE {where} "
-                    "ORDER BY document_id, chunk_index",
-                    parameters,
-                )
-                columns = [column.name for column in cursor.description]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, tenant_id, document_id, chunk_index, text, created_at, "
+                f"source FROM chunks JOIN documents USING (tenant_id, document_id) WHERE {where} "
+                "ORDER BY document_id, chunk_index",
+                parameters,
+            )
+            columns = [column.name for column in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 
 def schema_path() -> Path:

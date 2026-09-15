@@ -1,8 +1,8 @@
-"""Phase 2: deterministic query flow over chunks produced by ``rag.py``.
+"""Shared query validation, lexical retrieval, grounding, and citation logic.
 
-This module deliberately uses an in-memory lexical index.  Embeddings, a
-vector database, and a hosted LLM belong to later phases behind replaceable
-adapters.
+The in-memory path uses lexical cosine scoring. The PostgreSQL path can supply
+already-ranked pgvector matches through ``query_ranked`` and reuse the same
+validation, evidence threshold, abstention, and citation contract.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 
@@ -94,6 +95,12 @@ class RagQueryPipeline:
             raise UnsafeQueryError("query matched a prompt-injection policy")
         return safe_question
 
+    def validate_query(self, question: str, tenant_id: str) -> str:
+        """Validate before expensive retrieval or embedding work is performed."""
+        if not tenant_id.strip():
+            raise UnsafeQueryError("tenant_id is required")
+        return self._validate(question)
+
     def _retrieve(self, question: str, tenant_id: str) -> list[tuple[ChunkLike, float]]:
         query_terms = _terms(question)
         candidates = (
@@ -105,14 +112,34 @@ class RagQueryPipeline:
 
     def query(self, question: str, tenant_id: str, request_id: str | None = None) -> QueryResult:
         """Return a grounded response, or an explicit abstention when evidence is weak."""
-        if not tenant_id.strip():
-            raise UnsafeQueryError("tenant_id is required")
-        safe_question = self._validate(question)
+        safe_question = self.validate_query(question, tenant_id)
         grounded = [
             (chunk, score)
             for chunk, score in self._retrieve(safe_question, tenant_id)
             if score >= self.min_score
         ]
+        return self._build_result(grounded, request_id)
+
+    def query_ranked(
+        self,
+        question: str,
+        tenant_id: str,
+        ranked_chunks: Sequence[tuple[ChunkLike, float]],
+        request_id: str | None = None,
+    ) -> QueryResult:
+        """Format already-ranked vector results using the same safety/grounding rules."""
+        self.validate_query(question, tenant_id)
+        grounded = [
+            (chunk, score)
+            for chunk, score in ranked_chunks[: self.top_k]
+            if chunk.tenant_id == tenant_id and score >= self.min_score
+        ]
+        return self._build_result(grounded, request_id)
+
+    @staticmethod
+    def _build_result(
+        grounded: Sequence[tuple[ChunkLike, float]], request_id: str | None
+    ) -> QueryResult:
         if not grounded:
             return QueryResult(
                 answer="I do not have enough evidence in the indexed documents to answer that.",

@@ -12,12 +12,13 @@ import os
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
-from query import RagQueryPipeline, UnsafeQueryError
+from embeddings import Embedder, LocalFastEmbedder
 from persistence import PostgresPersistence
+from query import RagQueryPipeline, UnsafeQueryError
 from rag import RagIngestionPipeline
 
 
@@ -36,11 +37,13 @@ class RagApiApplication:
         api_key: str | None = None,
         max_body_bytes: int = 5_000_000,
         persistence: PostgresPersistence | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("RAG_API_KEY", "local-development-key")
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
+        self.embedder = embedder or (LocalFastEmbedder() if persistence is not None else None)
         self._chunks: list[Any] = []
         self._lock = threading.Lock()
 
@@ -59,7 +62,9 @@ class RagApiApplication:
             raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
         return value
 
-    def handle(self, method: str, path: str, headers: dict[str, str], body: bytes = b"") -> tuple[int, dict[str, Any]]:
+    def handle(
+        self, method: str, path: str, headers: dict[str, str], body: bytes = b""
+    ) -> tuple[int, dict[str, Any]]:
         request_id = headers.get("x-request-id") or str(uuid4())
         if path == "/health/live" and method == "GET":
             return HTTPStatus.OK, {"status": "ok", "request_id": request_id}
@@ -68,7 +73,9 @@ class RagApiApplication:
                 try:
                     self.persistence.check_connection()
                 except Exception as exc:
-                    raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "database is unavailable") from exc
+                    raise ApiError(
+                        HTTPStatus.SERVICE_UNAVAILABLE, "database is unavailable"
+                    ) from exc
             return HTTPStatus.OK, {"status": "ready", "request_id": request_id}
         if method != "POST" or path not in {"/v1/documents", "/v1/query"}:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
@@ -83,13 +90,20 @@ class RagApiApplication:
             tenant_id = payload.get("tenant_id")
             content = payload.get("content")
             if not all(isinstance(value, str) for value in (filename, tenant_id, content)):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "filename, tenant_id, and content are required strings")
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "filename, tenant_id, and content are required strings",
+                )
             try:
                 result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
             except (UnicodeError, ValueError) as exc:
                 raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
             if self.persistence is not None:
-                stored = self.persistence.persist(result)
+                if not result.chunks:
+                    raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "document has no text to index")
+                assert self.embedder is not None
+                embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
+                stored = self.persistence.persist(result, embeddings, self.embedder.model_name)
                 chunks_created = stored.chunks_written
             else:
                 with self._lock:
@@ -107,42 +121,55 @@ class RagApiApplication:
         if not isinstance(question, str) or not isinstance(tenant_id, str):
             raise ApiError(HTTPStatus.BAD_REQUEST, "question and tenant_id are required strings")
         if self.persistence is not None:
-            rows = self.persistence.list_chunks(tenant_id)
-            query = RagQueryPipeline(
-                tuple(
-                    SimpleNamespace(
-                        id=row["id"],
-                        tenant_id=row["tenant_id"],
-                        document_id=row["document_id"],
-                        index=row["chunk_index"],
-                        text=row["text"],
-                        created_at=row["created_at"],
-                        source=row["source"],
+            assert self.embedder is not None
+            query = RagQueryPipeline(())
+            try:
+                safe_question = query.validate_query(question, tenant_id)
+                vector = self.embedder.embed_query(safe_question)
+                rows = self.persistence.search_similar(
+                    tenant_id, vector, limit=5, model_name=self.embedder.model_name
+                )
+                ranked = [
+                    (
+                        SimpleNamespace(
+                            id=row["id"],
+                            tenant_id=row["tenant_id"],
+                            document_id=row["document_id"],
+                            index=row["chunk_index"],
+                            text=row["text"],
+                            created_at=row["created_at"],
+                            source=row["source"],
+                        ),
+                        float(row["score"]),
                     )
                     for row in rows
-                )
-            )
+                ]
+            except UnsafeQueryError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         else:
             with self._lock:
                 query = RagQueryPipeline(tuple(self._chunks))
         try:
-            result = query.query(question, tenant_id, request_id=request_id)
+            if self.persistence is not None:
+                result = query.query_ranked(safe_question, tenant_id, ranked, request_id=request_id)
+            else:
+                result = query.query(question, tenant_id, request_id=request_id)
         except UnsafeQueryError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         return HTTPStatus.OK, {
-                "answer": result.answer,
-                "grounded": result.grounded,
-                "request_id": result.request_id,
-                "citations": [
-                    {
-                        "document_id": citation.document_id,
-                        "source": citation.source,
-                        "chunk_index": citation.chunk_index,
-                        "score": citation.score,
-                        "excerpt": citation.excerpt,
-                    }
-                    for citation in result.citations
-                ],
+            "answer": result.answer,
+            "grounded": result.grounded,
+            "request_id": result.request_id,
+            "citations": [
+                {
+                    "document_id": citation.document_id,
+                    "source": citation.source,
+                    "chunk_index": citation.chunk_index,
+                    "score": citation.score,
+                    "excerpt": citation.excerpt,
+                }
+                for citation in result.citations
+            ],
         }
 
 
@@ -157,17 +184,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         self._dispatch()
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         self._dispatch()
 
     def _dispatch(self) -> None:
         try:
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(min(length, self.application.max_body_bytes + 1))
-            status, payload = self.application.handle(self.command, self.path, dict(self.headers), body)
+            status, payload = self.application.handle(
+                self.command, self.path, dict(self.headers), body
+            )
         except ApiError as exc:
             status, payload = exc.status, {"detail": exc.message}
         except Exception:

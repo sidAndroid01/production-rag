@@ -1,6 +1,6 @@
-# Production RAG — Phase 1 through Phase 4 foundations
+# Production RAG — Phase 1 through Phase 6 foundations
 
-This repository is being built phase by phase. **Four standalone foundations are now published: document ingestion, a deterministic query flow, an authenticated API boundary, and PostgreSQL persistence ready for pgvector embeddings. The API can now use that persistence layer when configured.** Hosted generation, evaluation, deployment, and the remaining production controls will be added in later phases after these boundaries are understood and tested.
+This repository is being built phase by phase. **The published foundations now include document ingestion, a deterministic query flow, an authenticated API boundary, PostgreSQL persistence, API/database integration, local embeddings, and pgvector retrieval.** Hosted generation, evaluation, deployment, and remaining production controls will be added in later phases.
 
 ## What this phase does
 
@@ -185,13 +185,13 @@ pip install "psycopg[binary]"
 python3 api.py
 ```
 
-At startup the API initializes the schema. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. Query requests load only the requested tenant's chunks from PostgreSQL before invoking `RagQueryPipeline`. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
+At startup the API initializes the schema. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. The original integration loaded only the requested tenant's chunks into the lexical query pipeline; Phase 6 replaces this with direct pgvector similarity search. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
 
-This phase proves the application boundary survives process restarts and separates transport from storage. It still performs lexical ranking in Python; vector similarity and an HNSW index come after the embedding model is selected.
+This phase proves the application boundary survives process restarts and separates transport from storage. With the next phase enabled, it also uses local vector retrieval; without the database it keeps the lexical in-memory demo.
 
 ## Phase 4: PostgreSQL + pgvector persistence
 
-`persistence.py` is the durable repository boundary. It stores document metadata and chunks in PostgreSQL, enables the `vector` extension, and leaves an `embedding vector` column ready for the later embedding phase. The write path is transactional: a document and all of its chunks are committed together.
+`persistence.py` is the durable repository boundary. It stores document metadata and chunks in PostgreSQL and enables the `vector` extension. The initial schema left `embedding` untyped; Phase 6 migrates it to the selected model's `vector(384)` type. The write path is transactional: a document and all of its chunks are committed together.
 
 ```text
 IngestResult
@@ -208,13 +208,14 @@ The schema is in [`schema.sql`](schema.sql), and [`docker-compose.persistence.ym
 Install the Python driver and start the database:
 
 ```bash
-pip install "psycopg[binary]"
+pip install -r requirements-embeddings.txt
 docker compose -f docker-compose.persistence.yml up -d
 ```
 
 Use the repository:
 
 ```python
+from embeddings import LocalFastEmbedder
 from persistence import PostgresPersistence
 from rag import RagIngestionPipeline
 
@@ -223,11 +224,13 @@ store.initialize()  # safe to run repeatedly
 result = RagIngestionPipeline().ingest(
     b"Refunds are available within thirty days.", "policy.txt", "default"
 )
-print(store.persist(result))
+embedder = LocalFastEmbedder()
+vectors = embedder.embed_documents([chunk.text for chunk in result.chunks])
+print(store.persist(result, vectors, embedder.model_name))
 print(store.list_chunks("default"))
 ```
 
-The current query baseline still ranks in memory. The next retrieval phase will adapt `list_chunks()` to SQL full-text search and later to `embedding <=> query_vector` with an HNSW index after an embedding model and dimension are selected. Keeping the embedding column nullable avoids pretending that a model has already been chosen.
+The vector column is now constrained to the selected model's 384 dimensions, with a cosine HNSW index. See Phase 6 below for the embedding and retrieval path.
 
 ### Persistence contract and boundaries
 
@@ -237,9 +240,37 @@ The current query baseline still ranks in memory. The next retrieval phase will 
 | Atomicity | document and chunks in one transaction | job/outbox coordination for external embedding calls |
 | Idempotency | tenant + original content SHA-256 | explicit document versions and deletion workflows |
 | Tenant safety | tenant columns and scoped reads | database row-level security and application identity |
-| Vector field | nullable, dimension-unbounded `vector` | selected model dimension, HNSW/IVFFlat index, backfills |
+| Vector field | `vector(384)` for BGE-small | alternative model migration and versioned backfills |
 | Files | chunk text in PostgreSQL | object storage for original uploads |
 | Recovery | local named Docker volume | backups, point-in-time restore, replication, disaster recovery |
+
+## Phase 6: local embeddings and pgvector retrieval
+
+`embeddings.py` wraps FastEmbed and the open BGE-small English model (`BAAI/bge-small-en-v1.5`). It runs on the application machine's CPU, sends no text to a paid embedding API, returns 384-dimensional vectors, and batches document chunks. Model files download once from their distribution source and are cached locally; inference thereafter is local. There is no per-token API charge, though the initial download and local CPU/RAM use are real requirements.
+
+Install the local runtime dependencies:
+
+```bash
+pip install -r requirements-embeddings.txt
+```
+
+With `DATABASE_URL` configured, ingestion is now:
+
+```text
+document → chunks → local passage embeddings → one PostgreSQL transaction
+```
+
+Query is now:
+
+```text
+question → validate → local query embedding
+  → tenant/model-filtered SQL vector search
+  → cosine similarity score → evidence gate → answer + citations
+```
+
+The schema constrains `chunks.embedding` to `vector(384)` and creates a partial HNSW cosine index for embedded rows. SQL filters by tenant and embedding model before returning candidates. The API passes those scored rows to the shared query response builder for thresholding, abstention, and citation formatting. The no-database demo still uses the lexical in-memory retriever.
+
+The selected model is English-focused and supports up to 512 input tokens. Our 900-character chunks can exceed that token limit in some cases; before calling this production-ready, we should add model-aware token limits/truncation checks and a backfill command for chunks stored before embeddings existed. See [FastEmbed's supported model list](https://qdrant.github.io/fastembed/examples/Supported_Models/) and [pgvector](https://github.com/pgvector/pgvector).
 
 ## Phase plan
 
@@ -250,7 +281,7 @@ The repository will grow in this order:
 3. **Phase 3 — API boundary:** authenticated JSON routes, validation, health probes, and error mapping.
 4. **Phase 4 — PostgreSQL persistence:** durable metadata, transactional chunks, idempotency, and pgvector readiness.
 5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
-6. **Phase 6 — embeddings and vector retrieval:** model adapter, vector population, HNSW/IVFFlat, and SQL similarity search.
+6. **Phase 6 — local embeddings and pgvector retrieval (this phase):** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
 7. **Phase 7 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
 8. **Phase 8 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
 9. **Phase 9 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
@@ -272,9 +303,13 @@ Each phase adds a focused contract, tests, observability, and an updated README 
 - Why are health endpoints unauthenticated? Orchestrators need liveness and readiness probes before routing protected application traffic.
 - Why is the phase-three store in memory? It keeps the API contract runnable; persistence and restart behavior are deliberately deferred.
 - Why use PostgreSQL before a dedicated vector database? Documents, chunks, tenants, and jobs need relational constraints and transactions; pgvector lets us add similarity search without operating a second system.
-- Why is `embedding` nullable? Persistence can be built before choosing an embedding model; the dimension and index should match a measured model decision.
+- Why is the embedding dimension fixed now? The chosen BGE-small model emits 384 values; the database constraint catches accidental model/dimension mismatches.
 - Why enforce uniqueness on tenant plus content hash? It makes retries and identical uploads idempotent within a tenant.
 - Why use a Docker volume? Containers are replaceable processes; the volume keeps database files across restarts and container recreation.
+- How do we avoid embedding API costs? FastEmbed runs an open model locally on CPU; initial model download and local compute are required, but no text is sent to a hosted embedding API.
+- Why must query and document embeddings use the same model? Their vectors must inhabit the same learned coordinate space; mismatched models can return plausible-looking but meaningless distances.
+- Why use cosine distance here? The query contract uses cosine similarity, and pgvector's `<=>` operator returns cosine distance; `1 - distance` converts it into a similarity score for the evidence threshold.
+- What remains to make vector retrieval production-ready? Model-aware chunk token limits, old-chunk backfill, score calibration, ANN recall tests, query/index tuning for tenant filters, and operational monitoring.
 - Why keep an in-memory fallback? It makes the transport contract runnable without a database, while `DATABASE_URL` selects durable behavior explicitly.
 - What should readiness mean? Liveness means the process is running; readiness means required dependencies such as PostgreSQL can serve requests.
 
