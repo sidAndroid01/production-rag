@@ -1,0 +1,17 @@
+{
+  "question_count": 220,
+  "section_count": 22,
+  "quick_revision": {
+    "destination": "https://docs.google.com/document/d/1SZEuldphejmk55V2Q3Gwxgb076uMTJZRP5obBGvJuwU/edit?tab=t.0",
+    "markdown": "quick-revision.md",
+    "formatted_html": "quick-revision.html"
+  },
+  "detailed_explanation": {
+    "destination": "https://docs.google.com/document/d/19JF4nCVackD17nZpXFZ8xQ4Cp3kC96kDndTJ7rxcLV0/edit?tab=t.0",
+    "markdown": "detailed-explanation.md",
+    "formatted_html": "detailed-explanation.html"
+  },
+  "google_docs_status": "Not updated. No browser or Google Docs editing connection is available.",
+  "existing_document_contents": "Not accessible; preserve and inspect before adding content.",
+  "prepared_date": "2026-09-06"
+}

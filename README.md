@@ -2,6 +2,12 @@
 
 This repository is being built phase by phase. **The published foundations now include document ingestion, a deterministic query flow, an authenticated API boundary, PostgreSQL persistence, API/database integration, local embeddings, and pgvector retrieval.** Hosted generation, evaluation, deployment, and remaining production controls will be added in later phases.
 
+## Repository history and canonical implementation
+
+This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval.
+
+The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by `schema.sql` and `docker-compose.persistence.yml`. Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
+
 ## What this phase does
 
 `rag.py` turns one uploaded document into stable, inspectable chunks that later RAG stages can consume:

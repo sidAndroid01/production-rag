@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1550" viewBox="0 0 2200 1550" role="img">
+<title>Production RAG · Planned production layers</title>
+<desc>Roadmap only • These components are not implemented in the inspected baseline. Eight color-coded branches connect the central topic to detailed child nodes.</desc>
+<rect width="2200" height="1550" fill="#f8fafc"/>
+<text x="1100" y="67" text-anchor="middle" font-family="Arial,sans-serif" font-size="38" font-weight="700" fill="#0f172a">Production RAG · Planned production layers</text>
+<text x="1100" y="107" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" fill="#475569">Roadmap only • These components are not implemented in the inspected baseline</text>
+<path d="M 965 800 C 910.0 800, 910.0 280, 855 280" fill="none" stroke="#2563eb" stroke-width="5" opacity="0.65"/>
+<path d="M 575 280 C 517.5 280, 517.5 182, 460 182" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.65"/>
+<path d="M 575 280 C 517.5 280, 517.5 231, 460 231" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.65"/>
+<path d="M 575 280 C 517.5 280, 517.5 280, 460 280" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.65"/>
+<path d="M 575 280 C 517.5 280, 517.5 329, 460 329" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.65"/>
+<path d="M 575 280 C 517.5 280, 517.5 378, 460 378" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.65"/>
+<path d="M 965 800 C 910.0 800, 910.0 630, 855 630" fill="none" stroke="#0f766e" stroke-width="5" opacity="0.65"/>
+<path d="M 575 630 C 517.5 630, 517.5 532, 460 532" fill="none" stroke="#0f766e" stroke-width="2" opacity="0.65"/>
+<path d="M 575 630 C 517.5 630, 517.5 581, 460 581" fill="none" stroke="#0f766e" stroke-width="2" opacity="0.65"/>
+<path d="M 575 630 C 517.5 630, 517.5 630, 460 630" fill="none" stroke="#0f766e" stroke-width="2" opacity="0.65"/>
+<path d="M 575 630 C 517.5 630, 517.5 679, 460 679" fill="none" stroke="#0f766e" stroke-width="2" opacity="0.65"/>
+<path d="M 575 630 C 517.5 630, 517.5 728, 460 728" fill="none" stroke="#0f766e" stroke-width="2" opacity="0.65"/>
+<path d="M 965 800 C 910.0 800, 910.0 980, 855 980" fill="none" stroke="#7c3aed" stroke-width="5" opacity="0.65"/>
+<path d="M 575 980 C 517.5 980, 517.5 882, 460 882" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.65"/>
+<path d="M 575 980 C 517.5 980, 517.5 931, 460 931" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.65"/>
+<path d="M 575 980 C 517.5 980, 517.5 980, 460 980" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.65"/>
+<path d="M 575 980 C 517.5 980, 517.5 1029, 460 1029" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.65"/>
+<path d="M 575 980 C 517.5 980, 517.5 1078, 460 1078" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.65"/>
+<path d="M 965 800 C 910.0 800, 910.0 1330, 855 1330" fill="none" stroke="#b45309" stroke-width="5" opacity="0.65"/>
+<path d="M 575 1330 C 517.5 1330, 517.5 1232, 460 1232" fill="none" stroke="#b45309" stroke-width="2" opacity="0.65"/>
+<path d="M 575 1330 C 517.5 1330, 517.5 1281, 460 1281" fill="none" stroke="#b45309" stroke-width="2" opacity="0.65"/>
+<path d="M 575 1330 C 517.5 1330, 517.5 1330, 460 1330" fill="none" stroke="#b45309" stroke-width="2" opacity="0.65"/>
+<path d="M 575 1330 C 517.5 1330, 517.5 1379, 460 1379" fill="none" stroke="#b45309" stroke-width="2" opacity="0.65"/>
+<path d="M 575 1330 C 517.5 1330, 517.5 1428, 460 1428" fill="none" stroke="#b45309" stroke-width="2" opacity="0.65"/>
+<path d="M 1235 800 C 1290.0 800, 1290.0 280, 1345 280" fill="none" stroke="#0369a1" stroke-width="5" opacity="0.65"/>
+<path d="M 1625 280 C 1682.5 280, 1682.5 182, 1740 182" fill="none" stroke="#0369a1" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 280 C 1682.5 280, 1682.5 231, 1740 231" fill="none" stroke="#0369a1" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 280 C 1682.5 280, 1682.5 280, 1740 280" fill="none" stroke="#0369a1" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 280 C 1682.5 280, 1682.5 329, 1740 329" fill="none" stroke="#0369a1" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 280 C 1682.5 280, 1682.5 378, 1740 378" fill="none" stroke="#0369a1" stroke-width="2" opacity="0.65"/>
+<path d="M 1235 800 C 1290.0 800, 1290.0 630, 1345 630" fill="none" stroke="#be185d" stroke-width="5" opacity="0.65"/>
+<path d="M 1625 630 C 1682.5 630, 1682.5 532, 1740 532" fill="none" stroke="#be185d" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 630 C 1682.5 630, 1682.5 581, 1740 581" fill="none" stroke="#be185d" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 630 C 1682.5 630, 1682.5 630, 1740 630" fill="none" stroke="#be185d" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 630 C 1682.5 630, 1682.5 679, 1740 679" fill="none" stroke="#be185d" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 630 C 1682.5 630, 1682.5 728, 1740 728" fill="none" stroke="#be185d" stroke-width="2" opacity="0.65"/>
+<path d="M 1235 800 C 1290.0 800, 1290.0 980, 1345 980" fill="none" stroke="#475569" stroke-width="5" opacity="0.65"/>
+<path d="M 1625 980 C 1682.5 980, 1682.5 882, 1740 882" fill="none" stroke="#475569" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 980 C 1682.5 980, 1682.5 931, 1740 931" fill="none" stroke="#475569" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 980 C 1682.5 980, 1682.5 980, 1740 980" fill="none" stroke="#475569" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 980 C 1682.5 980, 1682.5 1029, 1740 1029" fill="none" stroke="#475569" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 980 C 1682.5 980, 1682.5 1078, 1740 1078" fill="none" stroke="#475569" stroke-width="2" opacity="0.65"/>
+<path d="M 1235 800 C 1290.0 800, 1290.0 1330, 1345 1330" fill="none" stroke="#b91c1c" stroke-width="5" opacity="0.65"/>
+<path d="M 1625 1330 C 1682.5 1330, 1682.5 1232, 1740 1232" fill="none" stroke="#b91c1c" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 1330 C 1682.5 1330, 1682.5 1281, 1740 1281" fill="none" stroke="#b91c1c" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 1330 C 1682.5 1330, 1682.5 1330, 1740 1330" fill="none" stroke="#b91c1c" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 1330 C 1682.5 1330, 1682.5 1379, 1740 1379" fill="none" stroke="#b91c1c" stroke-width="2" opacity="0.65"/>
+<path d="M 1625 1330 C 1682.5 1330, 1682.5 1428, 1740 1428" fill="none" stroke="#b91c1c" stroke-width="2" opacity="0.65"/>
+<rect x="575.0" y="248.0" width="280" height="64" rx="16" fill="#2563eb" stroke="#2563eb" stroke-width="1"/>
+<text x="715" y="288.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Durable storage</text>
+<rect x="50.0" y="162.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+<text x="255" y="190.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Postgres + pgvector</text>
+<rect x="50.0" y="211.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+<text x="255" y="239.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Schema and migrations</text>
+<rect x="50.0" y="260.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+<text x="255" y="288.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Tenant authorization</text>
+<rect x="50.0" y="309.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+<text x="255" y="337.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Document lifecycle</text>
+<rect x="50.0" y="358.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#2563eb" stroke-width="1"/>
+<text x="255" y="386.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Backups and recovery</text>
+<rect x="575.0" y="598.0" width="280" height="64" rx="16" fill="#0f766e" stroke="#0f766e" stroke-width="1"/>
+<text x="715" y="638.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Ingestion workers</text>
+<rect x="50.0" y="512.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0f766e" stroke-width="1"/>
+<text x="255" y="540.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Background job queue</text>
+<rect x="50.0" y="561.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0f766e" stroke-width="1"/>
+<text x="255" y="589.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Original-file object storage</text>
+<rect x="50.0" y="610.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0f766e" stroke-width="1"/>
+<text x="255" y="638.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Retries and idempotency</text>
+<rect x="50.0" y="659.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0f766e" stroke-width="1"/>
+<text x="255" y="687.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">PDF / HTML extraction</text>
+<rect x="50.0" y="708.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0f766e" stroke-width="1"/>
+<text x="255" y="736.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Isolated parsing</text>
+<rect x="575.0" y="948.0" width="280" height="64" rx="16" fill="#7c3aed" stroke="#7c3aed" stroke-width="1"/>
+<text x="715" y="988.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Better retrieval</text>
+<rect x="50.0" y="862.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1"/>
+<text x="255" y="890.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Embedding provider</text>
+<rect x="50.0" y="911.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1"/>
+<text x="255" y="939.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Batching and versioning</text>
+<rect x="50.0" y="960.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1"/>
+<text x="255" y="988.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Hybrid lexical + vector search</text>
+<rect x="50.0" y="1009.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1"/>
+<text x="255" y="1037.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Reranking and deduplication</text>
+<rect x="50.0" y="1058.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1"/>
+<text x="255" y="1086.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Calibrated relevance gate</text>
+<rect x="575.0" y="1298.0" width="280" height="64" rx="16" fill="#b45309" stroke="#b45309" stroke-width="1"/>
+<text x="715" y="1338.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Model generation</text>
+<rect x="50.0" y="1212.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b45309" stroke-width="1"/>
+<text x="255" y="1240.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Model gateway</text>
+<rect x="50.0" y="1261.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b45309" stroke-width="1"/>
+<text x="255" y="1289.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Timeouts and fallback</text>
+<rect x="50.0" y="1310.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b45309" stroke-width="1"/>
+<text x="255" y="1338.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Token and cost budgets</text>
+<rect x="50.0" y="1359.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b45309" stroke-width="1"/>
+<text x="255" y="1387.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Structured answers</text>
+<rect x="50.0" y="1408.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b45309" stroke-width="1"/>
+<text x="255" y="1436.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Citation verification</text>
+<rect x="1345.0" y="248.0" width="280" height="64" rx="16" fill="#0369a1" stroke="#0369a1" stroke-width="1"/>
+<text x="1485" y="288.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Safety &amp; access</text>
+<rect x="1740.0" y="162.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0369a1" stroke-width="1"/>
+<text x="1945" y="190.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Distinct authenticated tenants</text>
+<rect x="1740.0" y="211.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0369a1" stroke-width="1"/>
+<text x="1945" y="239.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">PII detection / redaction</text>
+<rect x="1740.0" y="260.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0369a1" stroke-width="1"/>
+<text x="1945" y="288.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Configurable policy</text>
+<rect x="1740.0" y="309.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0369a1" stroke-width="1"/>
+<text x="1945" y="337.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Adversarial input coverage</text>
+<rect x="1740.0" y="358.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#0369a1" stroke-width="1"/>
+<text x="1945" y="386.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Per-tenant rate limits</text>
+<rect x="1345.0" y="598.0" width="280" height="64" rx="16" fill="#be185d" stroke="#be185d" stroke-width="1"/>
+<text x="1485" y="638.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Quality evidence</text>
+<rect x="1740.0" y="512.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#be185d" stroke-width="1"/>
+<text x="1945" y="540.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Versioned golden dataset</text>
+<rect x="1740.0" y="561.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#be185d" stroke-width="1"/>
+<text x="1945" y="589.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Recall@k / MRR / nDCG</text>
+<rect x="1740.0" y="610.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#be185d" stroke-width="1"/>
+<text x="1945" y="638.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Faithfulness and relevance</text>
+<rect x="1740.0" y="659.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#be185d" stroke-width="1"/>
+<text x="1945" y="687.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Citation precision</text>
+<rect x="1740.0" y="708.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#be185d" stroke-width="1"/>
+<text x="1945" y="736.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Latency / cost regression gates</text>
+<rect x="1345.0" y="948.0" width="280" height="64" rx="16" fill="#475569" stroke="#475569" stroke-width="1"/>
+<text x="1485" y="988.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Observability</text>
+<rect x="1740.0" y="862.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#475569" stroke-width="1"/>
+<text x="1945" y="890.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Request-ID correlation</text>
+<rect x="1740.0" y="911.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#475569" stroke-width="1"/>
+<text x="1945" y="939.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">OpenTelemetry traces</text>
+<rect x="1740.0" y="960.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#475569" stroke-width="1"/>
+<text x="1945" y="988.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Prometheus metrics</text>
+<rect x="1740.0" y="1009.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#475569" stroke-width="1"/>
+<text x="1945" y="1037.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Grafana dashboards</text>
+<rect x="1740.0" y="1058.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#475569" stroke-width="1"/>
+<text x="1945" y="1086.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Dependency-aware readiness</text>
+<rect x="1345.0" y="1298.0" width="280" height="64" rx="16" fill="#b91c1c" stroke="#b91c1c" stroke-width="1"/>
+<text x="1485" y="1338.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#ffffff">Delivery</text>
+<rect x="1740.0" y="1212.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1945" y="1240.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Chat and document UI</text>
+<rect x="1740.0" y="1261.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1945" y="1289.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Infrastructure as code</text>
+<rect x="1740.0" y="1310.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1945" y="1338.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Load testing</text>
+<rect x="1740.0" y="1359.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1945" y="1387.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Autoscaling and backups</text>
+<rect x="1740.0" y="1408.5" width="410" height="39" rx="16" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1945" y="1436.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="23" font-weight="400" fill="#1e293b">Threat model and demo</text>
+<rect x="965.0" y="737.0" width="270" height="126" rx="16" fill="#172554" stroke="#172554" stroke-width="1"/>
+<text x="1100" y="791.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="28" font-weight="700" fill="#ffffff">Production RAG</text>
+<text x="1100" y="825.0" text-anchor="middle" font-family="Arial,sans-serif" font-size="28" font-weight="700" fill="#ffffff">Planned layers</text>
+</svg>
