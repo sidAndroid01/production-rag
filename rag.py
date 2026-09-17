@@ -52,6 +52,15 @@ class RagIngestionPipeline:
             text,
         )
 
+    @staticmethod
+    def _normalize_identifier(value: str, field: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{field} is required")
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError(f"{field} contains control characters")
+        return normalized
+
     def _split(self, text: str) -> list[str]:
         normalized = re.sub(r"\s+", " ", text).strip()
         if not normalized:
@@ -74,10 +83,8 @@ class RagIngestionPipeline:
 
     def ingest(self, data: bytes, filename: str, tenant_id: str) -> IngestResult:
         """Return content-addressed chunks without performing downstream RAG work."""
-        if not filename.strip():
-            raise ValueError("filename is required")
-        if not tenant_id.strip():
-            raise ValueError("tenant_id is required")
+        filename = self._normalize_identifier(filename, "filename")
+        tenant_id = self._normalize_identifier(tenant_id, "tenant_id")
 
         text = data.decode("utf-8", errors="strict")
         safe_text = self._sanitize_document(text)

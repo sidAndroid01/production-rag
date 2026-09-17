@@ -38,8 +38,10 @@ class RagApiApplication:
         max_body_bytes: int = 5_000_000,
         persistence: PostgresPersistence | None = None,
         embedder: Embedder | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("RAG_API_KEY", "local-development-key")
+        self.tenant_id = tenant_id.strip() if tenant_id and tenant_id.strip() else None
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
@@ -51,6 +53,15 @@ class RagApiApplication:
         normalized = {key.lower(): value for key, value in headers.items()}
         if normalized.get("x-api-key") != self.api_key:
             raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid or missing API key")
+
+    def _tenant_from_payload(self, payload: dict[str, Any]) -> str:
+        tenant_id = payload.get("tenant_id")
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "tenant_id is required as a non-empty string")
+        normalized = tenant_id.strip()
+        if self.tenant_id is not None and normalized != self.tenant_id:
+            raise ApiError(HTTPStatus.FORBIDDEN, "tenant_id does not match authenticated identity")
+        return normalized
 
     @staticmethod
     def _json_body(body: bytes) -> dict[str, Any]:
@@ -87,13 +98,13 @@ class RagApiApplication:
 
         if path == "/v1/documents":
             filename = payload.get("filename")
-            tenant_id = payload.get("tenant_id")
             content = payload.get("content")
-            if not all(isinstance(value, str) for value in (filename, tenant_id, content)):
+            if not isinstance(filename, str) or not isinstance(content, str):
                 raise ApiError(
                     HTTPStatus.BAD_REQUEST,
-                    "filename, tenant_id, and content are required strings",
+                    "filename and content are required strings",
                 )
+            tenant_id = self._tenant_from_payload(payload)
             try:
                 result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
             except (UnicodeError, ValueError) as exc:
@@ -117,17 +128,17 @@ class RagApiApplication:
             }
 
         question = payload.get("question")
-        tenant_id = payload.get("tenant_id")
-        if not isinstance(question, str) or not isinstance(tenant_id, str):
-            raise ApiError(HTTPStatus.BAD_REQUEST, "question and tenant_id are required strings")
+        if not isinstance(question, str):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "question is required as a string")
+        tenant_id = self._tenant_from_payload(payload)
         if self.persistence is not None:
             assert self.embedder is not None
             query = RagQueryPipeline(())
             try:
                 safe_question = query.validate_query(question, tenant_id)
                 vector = self.embedder.embed_query(safe_question)
-                rows = self.persistence.search_similar(
-                    tenant_id, vector, limit=5, model_name=self.embedder.model_name
+                rows = self.persistence.search_hybrid(
+                    tenant_id, safe_question, vector, limit=5, model_name=self.embedder.model_name
                 )
                 ranked = [
                     (
@@ -212,8 +223,16 @@ def run() -> None:
     dsn = os.getenv("DATABASE_URL")
     persistence = PostgresPersistence(dsn) if dsn else None
     if persistence is not None:
+        configured_tenant = os.getenv("RAG_TENANT_ID")
+        if not configured_tenant or not configured_tenant.strip():
+            raise RuntimeError("RAG_TENANT_ID is required when DATABASE_URL is configured")
         persistence.initialize()
-    RequestHandler.application = RagApiApplication(persistence=persistence)
+    else:
+        configured_tenant = os.getenv("RAG_TENANT_ID")
+    RequestHandler.application = RagApiApplication(
+        persistence=persistence,
+        tenant_id=configured_tenant,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", port), RequestHandler)
     print(f"RAG API listening on http://127.0.0.1:{port}")
     server.serve_forever()

@@ -59,6 +59,13 @@ class FakePersistence:
         del query_embedding, model_name
         return [row for row in self.chunks if row["tenant_id"] == tenant_id][:limit]
 
+    def search_hybrid(
+        self, tenant_id: str, query_text: str, query_embedding: list[float],
+        limit: int, model_name: str
+    ) -> list[dict[str, object]]:
+        del query_text, query_embedding, model_name
+        return [row for row in self.chunks if row["tenant_id"] == tenant_id][:limit]
+
 
 def _call(
     app: RagApiApplication, method: str, path: str, payload: dict[str, str] | None = None
@@ -148,3 +155,35 @@ def test_postgres_repository_rejects_bad_embedding_before_connecting() -> None:
         repository.persist(result, [[0.1, 0.2]])
     with pytest.raises(ValueError, match="384"):
         repository.search_similar("tenant-a", [0.1, 0.2])
+
+
+def test_ingestion_normalizes_tenant_and_rejects_control_characters() -> None:
+    from rag import RagIngestionPipeline
+
+    result = RagIngestionPipeline().ingest(b"policy", " policy.txt ", " tenant-a ")
+    assert result.chunks[0].tenant_id == "tenant-a"
+    assert result.chunks[0].source == "policy.txt"
+    with pytest.raises(ValueError, match="control"):
+        RagIngestionPipeline().ingest(b"policy", "policy.txt", "tenant\n-a")
+
+
+def test_chunker_makes_progress_for_tokens_larger_than_chunk_size() -> None:
+    from rag import RagIngestionPipeline
+
+    result = RagIngestionPipeline(chunk_size=10, overlap=3).ingest(
+        b"x" * 37, "long-token.txt", "tenant-a"
+    )
+    assert [chunk.index for chunk in result.chunks] == list(range(len(result.chunks)))
+    assert "".join(chunk.text for chunk in result.chunks).startswith("x" * 37)
+
+
+def test_configured_tenant_identity_rejects_body_tenant_mismatch() -> None:
+    app = RagApiApplication(api_key="test-key", tenant_id="tenant-a")
+    status, payload = _call(
+        app,
+        "POST",
+        "/v1/documents",
+        {"filename": "policy.txt", "tenant_id": "tenant-b", "content": "evidence"},
+    )
+    assert status == 403
+    assert payload["detail"] == "tenant_id does not match authenticated identity"

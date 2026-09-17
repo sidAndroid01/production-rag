@@ -8,6 +8,8 @@ This project is built in visible phases. Phases 1–2 begin with pure in-memory 
 
 The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by `schema.sql` and `docker-compose.persistence.yml`. Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
 
+The API now supports an explicit tenant identity binding. Set `RAG_TENANT_ID` for a deployed API instance; requests whose body tenant differs from that authenticated identity are rejected. The body field remains visible in the learning API so the data flow is easy to inspect, but production authentication should derive it from an API-key or JWT claim rather than trusting a client-selected tenant.
+
 ## What this phase does
 
 `rag.py` turns one uploaded document into stable, inspectable chunks that later RAG stages can consume:
@@ -187,6 +189,7 @@ Set `DATABASE_URL` to switch the API from its in-memory fallback to PostgreSQL:
 
 ```bash
 export DATABASE_URL='postgresql://rag:rag-local-password@localhost:5432/rag'
+export RAG_TENANT_ID='default'
 pip install "psycopg[binary]"
 python3 api.py
 ```
@@ -278,6 +281,21 @@ The schema constrains `chunks.embedding` to `vector(384)` and creates a partial 
 
 The selected model is English-focused and supports up to 512 input tokens. Our 900-character chunks can exceed that token limit in some cases; before calling this production-ready, we should add model-aware token limits/truncation checks and a backfill command for chunks stored before embeddings existed. See [FastEmbed's supported model list](https://qdrant.github.io/fastembed/examples/Supported_Models/) and [pgvector](https://github.com/pgvector/pgvector).
 
+## Phase 7: hybrid retrieval and deterministic reranking
+
+The persistent query path now retrieves candidates from two signals:
+
+```text
+question
+  → semantic candidates from pgvector/HNSW
+  → keyword candidates from PostgreSQL full-text search + GIN
+  → reciprocal-rank fusion
+  → exact-term overlap tie-breaker
+  → final top-k evidence gate and citations
+```
+
+`search_hybrid()` keeps cosine similarity and `ts_rank_cd` on separate scales, fuses their ranks, and then applies a transparent second-stage score. This is a local deterministic reranker, useful as a production baseline and easy to test. It is not a learned cross-encoder; a later adapter can rerank the fused top 20–50 candidates with a BGE/Cohere/cross-encoder model while preserving the same response contract. The keyword side uses a generated `tsvector` column and a GIN index; the semantic side continues to use the HNSW cosine index.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -287,10 +305,11 @@ The repository will grow in this order:
 3. **Phase 3 — API boundary:** authenticated JSON routes, validation, health probes, and error mapping.
 4. **Phase 4 — PostgreSQL persistence:** durable metadata, transactional chunks, idempotency, and pgvector readiness.
 5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
-6. **Phase 6 — local embeddings and pgvector retrieval (this phase):** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
-7. **Phase 7 — retrieval quality:** hybrid search, reranking, query transformation, and metadata filters.
-8. **Phase 8 — generation and safety:** model gateway, grounded prompts, verification, abstention, and policy controls.
-9. **Phase 9 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, and deployment.
+6. **Phase 6 — local embeddings and pgvector retrieval:** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
+7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
+8. **Phase 8 — retrieval hardening:** migrations, row-level security, metadata filters, deduplication, model-aware chunk limits, learned reranking, and query transformation.
+9. **Phase 9 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
+10. **Phase 10 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, rate limiting, and deployment.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

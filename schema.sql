@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id TEXT NOT NULL,
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     text TEXT NOT NULL,
+    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
     embedding vector(384),
     embedding_model TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -29,6 +30,9 @@ CREATE TABLE IF NOT EXISTS chunks (
         REFERENCES documents (tenant_id, document_id)
         ON DELETE CASCADE
 );
+
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS search_vector tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', text)) STORED;
 
 -- Upgrade databases created by earlier phases, where embedding was untyped.
 ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(384)
@@ -40,3 +44,5 @@ CREATE INDEX IF NOT EXISTS documents_tenant_index ON documents (tenant_id);
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     ON chunks USING hnsw (embedding vector_cosine_ops)
     WHERE embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chunks_search_vector_gin
+    ON chunks USING gin (search_vector);
