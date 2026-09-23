@@ -36,7 +36,7 @@ class IngestResult:
 class RagIngestionPipeline:
     """Validate, normalize, identify, and chunk one UTF-8 document."""
 
-    def __init__(self, chunk_size: int = 900, overlap: int = 120) -> None:
+    def __init__(self, chunk_size: int = 400, overlap: int = 50) -> None:
         if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
             raise ValueError("chunk_size must be positive and overlap must be smaller")
         self.chunk_size = chunk_size
@@ -62,21 +62,38 @@ class RagIngestionPipeline:
         return normalized
 
     def _split(self, text: str) -> list[str]:
-        normalized = re.sub(r"\s+", " ", text).strip()
-        if not normalized:
+        # Count tokens rather than characters. Keeping headings and sentence
+        # boundaries in the token stream improves retrieval and respects model
+        # context limits more reliably than character windows.
+        normalized_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+        normalized = "\n".join(line for line in normalized_lines if line)
+        tokens = re.findall(r"\S+", normalized)
+        if not tokens:
             return []
 
         chunks: list[str] = []
         start = 0
-        while start < len(normalized):
-            end = min(start + self.chunk_size, len(normalized))
-            if end < len(normalized):
-                boundary = normalized.rfind(" ", start, end)
-                end = boundary if boundary > start else end
-            chunks.append(normalized[start:end])
-            if end == len(normalized):
+        while start < len(tokens):
+            end = min(start + self.chunk_size, len(tokens))
+            if end < len(tokens):
+                # Prefer a sentence or heading boundary in the latter half of
+                # the target window, while guaranteeing progress for long runs.
+                floor = start + max(1, self.chunk_size // 2)
+                boundaries = [
+                    index + 1
+                    for index in range(start, end)
+                    if tokens[index].endswith((".", "!", "?", ":"))
+                ]
+                boundary = max(
+                    (candidate for candidate in boundaries if candidate >= floor),
+                    default=max(boundaries, default=end),
+                )
+                end = boundary
+            chunks.append(" ".join(tokens[start:end]))
+            if end == len(tokens):
                 break
-            # Always make progress when a single token is longer than the target.
+            # Always make progress, including when one token is larger than the
+            # configured window.
             next_start = end - self.overlap
             start = max(next_start, start + 1)
         return chunks

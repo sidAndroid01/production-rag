@@ -1,0 +1,16 @@
+{
+  "version": "golden-v1",
+  "description": "Small deterministic retrieval set used as a regression smoke test.",
+  "chunks": [
+    {"tenant_id": "demo", "document_id": "refunds", "chunk_index": 0, "source": "refunds.md", "text": "Customers can request a refund within thirty days of purchase."},
+    {"tenant_id": "demo", "document_id": "security", "chunk_index": 0, "source": "security.md", "text": "Two-factor authentication is required for administrator accounts."},
+    {"tenant_id": "demo", "document_id": "storage", "chunk_index": 0, "source": "storage.md", "text": "The Team plan includes one terabyte of file storage."},
+    {"tenant_id": "demo", "document_id": "support", "chunk_index": 0, "source": "support.md", "text": "Priority support is available twenty-four hours per day."}
+  ],
+  "queries": [
+    {"tenant_id": "demo", "question": "How long do customers have to request a refund?", "relevant_sources": ["refunds.md"]},
+    {"tenant_id": "demo", "question": "Which accounts require two-factor authentication?", "relevant_sources": ["security.md"]},
+    {"tenant_id": "demo", "question": "How much file storage is included in Team?", "relevant_sources": ["storage.md"]},
+    {"tenant_id": "demo", "question": "When is priority support available?", "relevant_sources": ["support.md"]}
+  ]
+}

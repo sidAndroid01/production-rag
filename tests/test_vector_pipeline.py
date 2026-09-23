@@ -177,6 +177,16 @@ def test_chunker_makes_progress_for_tokens_larger_than_chunk_size() -> None:
     assert "".join(chunk.text for chunk in result.chunks).startswith("x" * 37)
 
 
+def test_chunker_targets_tokens_and_prefers_sentence_boundaries() -> None:
+    from rag import RagIngestionPipeline
+
+    result = RagIngestionPipeline(chunk_size=8, overlap=2).ingest(
+        b"One two three four. Five six seven eight nine ten.", "guide.txt", "tenant-a"
+    )
+    assert len(result.chunks) >= 2
+    assert result.chunks[0].text.endswith("four.")
+
+
 def test_configured_tenant_identity_rejects_body_tenant_mismatch() -> None:
     app = RagApiApplication(api_key="test-key", tenant_id="tenant-a")
     status, payload = _call(

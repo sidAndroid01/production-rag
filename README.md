@@ -300,6 +300,10 @@ question
 
 PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. The schema records migration version `2` in `schema_migrations` so later changes can be applied as explicit migrations. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
 
+## Phase 9: token-aware ingestion and retrieval evaluation
+
+The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) runs the versioned [`golden-v1.json`](evals/datasets/golden-v1.json) set and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -312,9 +316,10 @@ The repository will grow in this order:
 6. **Phase 6 — local embeddings and pgvector retrieval:** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
 7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
 8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
-9. **Phase 9 — retrieval hardening:** versioned migration tooling, metadata filters, deduplication, model-aware chunk limits, learned reranking, and query transformation.
-10. **Phase 10 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
-11. **Phase 11 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, rate limiting, and deployment.
+9. **Phase 9 — ingestion and evaluation (this phase):** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
+10. **Phase 10 — retrieval hardening:** versioned migration tooling, metadata filters, deduplication, model-aware limits, learned reranking, and query transformation.
+11. **Phase 11 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
+12. **Phase 12 — operations and deployment:** tracing, cost and latency budgets, retries, rate limiting, backups, and production infrastructure.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 
