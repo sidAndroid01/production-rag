@@ -296,6 +296,10 @@ question
 
 `search_hybrid()` keeps cosine similarity and `ts_rank_cd` on separate scales, fuses their ranks, and then applies a transparent second-stage score. This is a local deterministic reranker, useful as a production baseline and easy to test. It is not a learned cross-encoder; a later adapter can rerank the fused top 20–50 candidates with a BGE/Cohere/cross-encoder model while preserving the same response contract. The keyword side uses a generated `tsvector` column and a GIN index; the semantic side continues to use the HNSW cosine index.
 
+## Phase 8: tenant database security and document lifecycle
+
+PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. The schema records migration version `2` in `schema_migrations` so later changes can be applied as explicit migrations. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -307,9 +311,10 @@ The repository will grow in this order:
 5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
 6. **Phase 6 — local embeddings and pgvector retrieval:** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
 7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
-8. **Phase 8 — retrieval hardening:** migrations, row-level security, metadata filters, deduplication, model-aware chunk limits, learned reranking, and query transformation.
-9. **Phase 9 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
-10. **Phase 10 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, rate limiting, and deployment.
+8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
+9. **Phase 9 — retrieval hardening:** versioned migration tooling, metadata filters, deduplication, model-aware chunk limits, learned reranking, and query transformation.
+10. **Phase 10 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
+11. **Phase 11 — evaluation and operations:** golden datasets, retrieval/answer metrics, tracing, cost and latency budgets, retries, rate limiting, and deployment.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

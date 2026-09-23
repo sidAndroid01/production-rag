@@ -46,3 +46,29 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     WHERE embedding IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chunks_search_vector_gin
     ON chunks USING gin (search_vector);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'documents_tenant_policy') THEN
+        CREATE POLICY documents_tenant_policy ON documents
+            USING (tenant_id = current_setting('app.tenant_id', true))
+            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'chunks_tenant_policy') THEN
+        CREATE POLICY chunks_tenant_policy ON chunks
+            USING (tenant_id = current_setting('app.tenant_id', true))
+            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+    END IF;
+END $$;
+
+INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;

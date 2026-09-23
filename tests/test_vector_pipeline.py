@@ -187,3 +187,18 @@ def test_configured_tenant_identity_rejects_body_tenant_mismatch() -> None:
     )
     assert status == 403
     assert payload["detail"] == "tenant_id does not match authenticated identity"
+
+
+def test_in_memory_document_delete_is_tenant_scoped() -> None:
+    app = RagApiApplication(api_key="test-key", tenant_id="tenant-a")
+    status, created = _call(
+        app, "POST", "/v1/documents",
+        {"filename": "policy.txt", "tenant_id": "tenant-a", "content": "evidence"},
+    )
+    assert status == 201
+    status, denied = _call(
+        app, "DELETE", f"/v1/documents/{created['document_id']}",
+        {"tenant_id": "tenant-b"},
+    )
+    assert status == 403
+    assert denied["detail"] == "tenant_id does not match authenticated identity"

@@ -88,13 +88,41 @@ class RagApiApplication:
                         HTTPStatus.SERVICE_UNAVAILABLE, "database is unavailable"
                     ) from exc
             return HTTPStatus.OK, {"status": "ready", "request_id": request_id}
-        if method != "POST" or path not in {"/v1/documents", "/v1/query"}:
+        document_id_to_delete = None
+        if method == "DELETE" and path.startswith("/v1/documents/"):
+            document_id_to_delete = path.removeprefix("/v1/documents/").strip()
+            if not document_id_to_delete:
+                raise ApiError(HTTPStatus.NOT_FOUND, "document route not found")
+        elif method != "POST" or path not in {"/v1/documents", "/v1/query"}:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
 
         self._authenticate(headers)
         if len(body) > self.max_body_bytes:
             raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
         payload = self._json_body(body)
+
+        if document_id_to_delete is not None:
+            tenant_id = self._tenant_from_payload(payload)
+            if self.persistence is not None:
+                deleted = self.persistence.delete_document(tenant_id, document_id_to_delete)
+            else:
+                with self._lock:
+                    before = len(self._chunks)
+                    self._chunks = [
+                        chunk for chunk in self._chunks
+                        if not (
+                            chunk.tenant_id == tenant_id
+                            and chunk.document_id == document_id_to_delete
+                        )
+                    ]
+                    deleted = len(self._chunks) != before
+            if not deleted:
+                raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
+            return HTTPStatus.OK, {
+                "document_id": document_id_to_delete,
+                "deleted": True,
+                "request_id": request_id,
+            }
 
         if path == "/v1/documents":
             filename = payload.get("filename")

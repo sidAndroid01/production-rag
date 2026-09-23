@@ -63,6 +63,32 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
     WHERE embedding IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chunks_search_vector_gin
     ON chunks USING gin (search_vector);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'documents_tenant_policy') THEN
+        CREATE POLICY documents_tenant_policy ON documents
+            USING (tenant_id = current_setting('app.tenant_id', true))
+            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'chunks_tenant_policy') THEN
+        CREATE POLICY chunks_tenant_policy ON chunks
+            USING (tenant_id = current_setting('app.tenant_id', true))
+            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+    END IF;
+END $$;
+
+INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
 """
 
 
@@ -92,6 +118,13 @@ class PostgresPersistence:
         """Create the extension, tables, and indexes in one transaction."""
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(SCHEMA_SQL)
+
+    @staticmethod
+    def _set_tenant(cursor: Any, tenant_id: str) -> None:
+        normalized = tenant_id.strip()
+        if not normalized:
+            raise ValueError("tenant_id is required")
+        cursor.execute("SELECT set_config('app.tenant_id', %s, true)", (normalized,))
 
     def check_connection(self) -> None:
         """Raise if PostgreSQL is unavailable; used by the readiness probe."""
@@ -129,6 +162,7 @@ class PostgresPersistence:
         tenant_id = first.tenant_id
         source = first.source
         with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
             cursor.execute(
                 """
                     INSERT INTO documents
@@ -190,6 +224,7 @@ class PostgresPersistence:
             raise ValueError(f"query embedding must be a finite {DIMENSIONS}-dimension vector")
         vector_literal = "[" + ",".join(map(str, vector)) + "]"
         with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
             cursor.execute(
                 """
                     SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
@@ -236,6 +271,7 @@ class PostgresPersistence:
             raise ValueError(f"query embedding must be a finite {DIMENSIONS}-dimension vector")
         vector_literal = "[" + ",".join(map(str, vector)) + "]"
         with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
             cursor.execute(
                 """
                 SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
@@ -328,6 +364,7 @@ class PostgresPersistence:
             where += " AND document_id = %s"
             parameters.append(document_id)
         with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
             cursor.execute(
                 "SELECT id, tenant_id, document_id, chunk_index, text, created_at, "
                 f"source FROM chunks JOIN documents USING (tenant_id, document_id) WHERE {where} "
@@ -336,6 +373,18 @@ class PostgresPersistence:
             )
             columns = [column.name for column in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    def delete_document(self, tenant_id: str, document_id: str) -> bool:
+        """Delete one tenant-owned document; its chunks cascade at the database."""
+        if not tenant_id.strip() or not document_id.strip():
+            raise ValueError("tenant_id and document_id are required")
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
+            cursor.execute(
+                "DELETE FROM documents WHERE tenant_id = %s AND document_id = %s",
+                (tenant_id.strip(), document_id.strip()),
+            )
+            return cursor.rowcount == 1
 
 
 def schema_path() -> Path:
