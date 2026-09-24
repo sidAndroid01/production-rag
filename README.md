@@ -304,6 +304,12 @@ PostgreSQL now enables and forces row-level security on both `documents` and `ch
 
 The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) runs the versioned [`golden-v1.json`](evals/datasets/golden-v1.json) set and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
 
+## Phase 10: pluggable chat, workers, permissions, and learned reranking
+
+The chat path is now available at `POST /v1/chat`. It keeps bounded history by tenant, user, and session, then sends the retrieved evidence and previous turns to a model provider. By default the repository uses a free extractive fallback. To use a personal OpenAI-compatible provider, set `RAG_MODEL_BASE_URL`, `RAG_MODEL_API_KEY`, and `RAG_MODEL_NAME`; this also works with Ollama, vLLM, and LM Studio endpoints. The API never stores the key in the repository.
+
+`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation. `reranker.py` can load a local Sentence Transformers cross-encoder when `requirements-reranking.txt` is installed, and falls back to the deterministic reranker when it is unavailable.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -317,9 +323,10 @@ The repository will grow in this order:
 7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
 8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
 9. **Phase 9 — ingestion and evaluation (this phase):** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
-10. **Phase 10 — retrieval hardening:** versioned migration tooling, metadata filters, deduplication, model-aware limits, learned reranking, and query transformation.
-11. **Phase 11 — generation and safety:** model gateway, grounded prompts, citation entailment, PII controls, and policy enforcement.
-12. **Phase 12 — operations and deployment:** tracing, cost and latency budgets, retries, rate limiting, backups, and production infrastructure.
+10. **Phase 10 — pluggable chat and platform adapters (this phase):** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
+11. **Phase 11 — retrieval hardening:** versioned migration tooling, persistent ACL metadata, deduplication, model-aware limits, and query transformation.
+12. **Phase 12 — generation and safety:** robust model gateway, citation entailment, PII controls, and policy enforcement.
+13. **Phase 13 — operations and deployment:** durable queues, tracing, cost and latency budgets, retries, rate limiting, backups, and production infrastructure.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

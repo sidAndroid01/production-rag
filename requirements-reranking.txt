@@ -1,0 +1,2 @@
+# Optional local learned reranker. The deterministic reranker remains the default.
+sentence-transformers>=3.0,<6

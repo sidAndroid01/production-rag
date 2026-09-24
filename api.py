@@ -17,9 +17,14 @@ from typing import Any
 from uuid import uuid4
 
 from embeddings import Embedder, LocalFastEmbedder
+from history import ChatHistoryStore
+from permissions import Principal, can_read
 from persistence import PostgresPersistence
+from providers import ChatTurn, ModelProvider, configured_provider
 from query import RagQueryPipeline, UnsafeQueryError
 from rag import RagIngestionPipeline
+from reranker import CrossEncoderReranker
+from workers import IngestionWorker
 
 
 class ApiError(Exception):
@@ -39,6 +44,8 @@ class RagApiApplication:
         persistence: PostgresPersistence | None = None,
         embedder: Embedder | None = None,
         tenant_id: str | None = None,
+        provider: ModelProvider | None = None,
+        reranker: CrossEncoderReranker | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("RAG_API_KEY", "local-development-key")
         self.tenant_id = tenant_id.strip() if tenant_id and tenant_id.strip() else None
@@ -46,8 +53,12 @@ class RagApiApplication:
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
         self.embedder = embedder or (LocalFastEmbedder() if persistence is not None else None)
+        self.provider = provider or configured_provider()
+        self.reranker = reranker or CrossEncoderReranker()
+        self.history = ChatHistoryStore()
         self._chunks: list[Any] = []
         self._lock = threading.Lock()
+        self.worker = IngestionWorker(self._ingest_document)
 
     def _authenticate(self, headers: dict[str, str]) -> None:
         normalized = {key.lower(): value for key, value in headers.items()}
@@ -73,6 +84,30 @@ class RagApiApplication:
             raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
         return value
 
+    def _ingest_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        filename = payload.get("filename")
+        content = payload.get("content")
+        if not isinstance(filename, str) or not isinstance(content, str):
+            raise ValueError("filename and content are required strings")
+        tenant_id = self._tenant_from_payload(payload)
+        result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
+        if self.persistence is not None:
+            if not result.chunks:
+                raise ValueError("document has no text to index")
+            assert self.embedder is not None
+            embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
+            stored = self.persistence.persist(result, embeddings, self.embedder.model_name)
+            chunks_created = stored.chunks_written
+        else:
+            with self._lock:
+                self._chunks.extend(result.chunks)
+            chunks_created = len(result.chunks)
+        return {
+            "document_id": result.document_id,
+            "content_sha256": result.content_sha256,
+            "chunks_created": chunks_created,
+        }
+
     def handle(
         self, method: str, path: str, headers: dict[str, str], body: bytes = b""
     ) -> tuple[int, dict[str, Any]]:
@@ -93,13 +128,22 @@ class RagApiApplication:
             document_id_to_delete = path.removeprefix("/v1/documents/").strip()
             if not document_id_to_delete:
                 raise ApiError(HTTPStatus.NOT_FOUND, "document route not found")
-        elif method != "POST" or path not in {"/v1/documents", "/v1/query"}:
+        elif method != "POST" or path not in {"/v1/documents", "/v1/query", "/v1/chat", "/v1/ingestion/jobs"}:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
 
         self._authenticate(headers)
         if len(body) > self.max_body_bytes:
             raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
         payload = self._json_body(body)
+
+        if path == "/v1/ingestion/jobs":
+            tenant_id = self._tenant_from_payload(payload)
+            job = self.worker.submit({
+                "filename": str(payload.get("filename", "")),
+                "content": str(payload.get("content", "")),
+                "tenant_id": tenant_id,
+            })
+            return HTTPStatus.ACCEPTED, {"job_id": job.id, "status": "queued", "request_id": request_id}
 
         if document_id_to_delete is not None:
             tenant_id = self._tenant_from_payload(payload)
@@ -125,33 +169,12 @@ class RagApiApplication:
             }
 
         if path == "/v1/documents":
-            filename = payload.get("filename")
-            content = payload.get("content")
-            if not isinstance(filename, str) or not isinstance(content, str):
-                raise ApiError(
-                    HTTPStatus.BAD_REQUEST,
-                    "filename and content are required strings",
-                )
-            tenant_id = self._tenant_from_payload(payload)
             try:
-                result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
+                stored = self._ingest_document(payload)
             except (UnicodeError, ValueError) as exc:
                 raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-            if self.persistence is not None:
-                if not result.chunks:
-                    raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "document has no text to index")
-                assert self.embedder is not None
-                embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
-                stored = self.persistence.persist(result, embeddings, self.embedder.model_name)
-                chunks_created = stored.chunks_written
-            else:
-                with self._lock:
-                    self._chunks.extend(result.chunks)
-                chunks_created = len(result.chunks)
             return HTTPStatus.CREATED, {
-                "document_id": result.document_id,
-                "content_sha256": result.content_sha256,
-                "chunks_created": chunks_created,
+                **stored,
                 "request_id": request_id,
             }
 
@@ -159,6 +182,7 @@ class RagApiApplication:
         if not isinstance(question, str):
             raise ApiError(HTTPStatus.BAD_REQUEST, "question is required as a string")
         tenant_id = self._tenant_from_payload(payload)
+        is_chat = path == "/v1/chat"
         if self.persistence is not None:
             assert self.embedder is not None
             query = RagQueryPipeline(())
@@ -168,6 +192,12 @@ class RagApiApplication:
                 rows = self.persistence.search_hybrid(
                     tenant_id, safe_question, vector, limit=5, model_name=self.embedder.model_name
                 )
+                principal = Principal(
+                    user_id=str(payload.get("user_id", "anonymous")),
+                    groups=frozenset(payload.get("groups", [])) if isinstance(payload.get("groups", []), list) else frozenset(),
+                )
+                rows = [row for row in rows if can_read(row, principal)]
+                rows = self.reranker.rerank(safe_question, rows)
                 ranked = [
                     (
                         SimpleNamespace(
@@ -195,8 +225,24 @@ class RagApiApplication:
                 result = query.query(question, tenant_id, request_id=request_id)
         except UnsafeQueryError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+        answer = result.answer
+        session_id = payload.get("session_id")
+        if is_chat:
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise ApiError(HTTPStatus.BAD_REQUEST, "session_id is required for chat")
+            user_id = str(payload.get("user_id", "anonymous"))
+            prior = self.history.get(tenant_id, user_id, session_id)
+            answer = self.provider.generate(
+                question,
+                [citation.excerpt for citation in result.citations],
+                prior,
+            ) if result.grounded else result.answer
+            self.history.append(
+                tenant_id, user_id, session_id,
+                ChatTurn("user", question), ChatTurn("assistant", answer),
+            )
         return HTTPStatus.OK, {
-            "answer": result.answer,
+            "answer": answer,
             "grounded": result.grounded,
             "request_id": result.request_id,
             "citations": [
@@ -209,6 +255,7 @@ class RagApiApplication:
                 }
                 for citation in result.citations
             ],
+            **({"session_id": session_id, "history_messages": len(self.history.get(tenant_id, str(payload.get("user_id", "anonymous")), session_id))} if is_chat else {}),
         }
 
 
