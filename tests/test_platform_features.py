@@ -12,7 +12,7 @@ class FakeProvider(ModelProvider):
     def generate(self, question: str, context: list[str], history: tuple[ChatTurn, ...]) -> str:
         del question, context
         self.histories.append(len(history))
-        return "model answer"
+        return "Refunds last thirty days [1]."
 
 
 def call(

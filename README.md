@@ -396,6 +396,39 @@ Deduplication is per tenant and content: re-uploading identical bytes with a dif
 
 **Android-developer translation:** this is the difference between trusting a `userId` extra in an `Intent` and reading the signed-in account from the server session. The client may say who it is; only the credential decides.
 
+## Phase 14: grounded generation
+
+Phase 10 connected a model, but the answer contract around it was loose:
+
+| Problem | Effect |
+| --- | --- |
+| Retrieved chunks were placed in the **system** message | injected document text gained the highest instruction priority |
+| The model received each chunk's 240-character citation excerpt | answers were generated from truncated evidence |
+| Every retrieved hit was returned as a citation | the response claimed support the answer never used |
+| Retrieval used only the latest message | "How often?" after "How are contractors paid?" searched for "How often?" |
+| Cross-encoder logits (about −10 to +10) met a 0.10 threshold meant for cosine | relevant chunks with negative logits were dropped, irrelevant positive ones kept |
+| `/v1/query` never used the configured model | only chat benefited from generation |
+
+The answer path is now the same for query and chat:
+
+```text
+question → validate
+  → (chat) rewrite follow-up into a standalone search query
+  → hybrid retrieval → ACL → rerank (scores in [0, 1]) → evidence gate
+  → model: system rules | history | user: <sources>[1..n] full text</sources> + question
+  → drop citation markers that point at no source
+  → keep only the sources the answer cites; no valid citation → abstain
+```
+
+- [`providers.py`](providers.py) owns the grounded-answer contract: the system prompt holds only rules; sources travel as delimited data in the user turn, and delimiter look-alikes inside documents are neutralized. `cited_sources()` and `strip_invalid_citations()` turn `[n]` markers into the response's `citations`, each with a `source_number` that matches the marker in the text.
+- An answer with no valid citation is replaced by the standard abstention and reported as `grounded: false`. A fluent but uncited answer is treated as unsupported.
+- `rewrite_query()` resolves follow-ups before retrieval. The OpenAI-compatible provider asks the model; the extractive provider (and the model path, if that call fails) prepends the previous user question. Chat responses include `search_query` when it differs from the question.
+- [`reranker.py`](reranker.py) passes cross-encoder logits through a sigmoid and keeps the fallback score within [0, 1], so one threshold means the same thing on both paths. A missing `sentence-transformers` is detected once instead of on every query.
+
+This is citation *alignment*, not entailment: the response now cites exactly what the answer claims to use, but whether each cited sentence supports its claim is measured in Phase 15's evaluation rather than verified per request.
+
+**Android-developer translation:** the system prompt is like your app's manifest permissions and the sources are like content from a `ContentProvider` you do not own: you render it, but it never gets to declare permissions.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -412,8 +445,8 @@ The repository will grow in this order:
 10. **Phase 10 — pluggable chat and platform adapters:** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
 11. **Phase 11 — runnable and verified:** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
 12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
-13. **Phase 13 — server-side identity (this phase):** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
-14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
+13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
+14. **Phase 14 — grounded generation (this phase):** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
 16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
 17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.

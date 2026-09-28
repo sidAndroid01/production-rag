@@ -26,7 +26,14 @@ from embeddings import Embedder, LocalFastEmbedder
 from history import ChatHistoryStore
 from permissions import Principal, can_read, can_read_groups, normalize_groups
 from persistence import PostgresPersistence
-from providers import ChatTurn, ModelProvider, configured_provider
+from providers import (
+    ABSTENTION,
+    ChatTurn,
+    ModelProvider,
+    cited_sources,
+    configured_provider,
+    strip_invalid_citations,
+)
 from query import RagQueryPipeline, UnsafeQueryError
 from rag import RagIngestionPipeline
 from reranker import CrossEncoderReranker
@@ -344,6 +351,44 @@ class RagApiApplication:
     def _chat(self, request: Request) -> tuple[int, dict[str, Any]]:
         return self._answer(request, is_chat=True)
 
+    def _retrieve(self, principal: Principal, question: str) -> list[tuple[Any, float]]:
+        """Return gated evidence the principal may read, best first."""
+        tenant_id = principal.tenant_id
+        if self.persistence is None:
+            readable = {row["document_id"] for row in self._visible_documents(principal)}
+            with self._lock:
+                chunks = tuple(c for c in self._chunks if c.document_id in readable)
+            return RagQueryPipeline(chunks).evidence(question, tenant_id)
+        assert self.embedder is not None
+        query = RagQueryPipeline(())
+        # Validate before any embedding or database work is spent on the query.
+        safe_question = query.validate_query(question, tenant_id)
+        rows = self.persistence.search_hybrid(
+            tenant_id,
+            safe_question,
+            self.embedder.embed_query(safe_question),
+            limit=20,
+            model_name=self.embedder.model_name,
+            groups=sorted(principal.groups),
+        )
+        # SQL already applied the ACL; re-check before rows become evidence.
+        rows = self.reranker.rerank(safe_question, [r for r in rows if can_read(r, principal)])
+        ranked = [
+            (
+                SimpleNamespace(
+                    id=row["id"],
+                    tenant_id=row["tenant_id"],
+                    document_id=row["document_id"],
+                    index=row["chunk_index"],
+                    text=row["text"],
+                    source=row["source"],
+                ),
+                float(row["score"]),
+            )
+            for row in rows
+        ]
+        return query.evidence(safe_question, tenant_id, ranked)
+
     def _answer(self, request: Request, *, is_chat: bool) -> tuple[int, dict[str, Any]]:
         payload = request.payload
         question = payload.get("question")
@@ -354,85 +399,61 @@ class RagApiApplication:
         session_id = payload.get("session_id")
         if is_chat and (not isinstance(session_id, str) or not session_id.strip()):
             raise ApiError(HTTPStatus.BAD_REQUEST, "session_id is required for chat")
-        try:
-            if self.persistence is not None:
-                assert self.embedder is not None
-                query = RagQueryPipeline(())
-                safe_question = query.validate_query(question, tenant_id)
-                vector = self.embedder.embed_query(safe_question)
-                rows = self.persistence.search_hybrid(
-                    tenant_id,
-                    safe_question,
-                    vector,
-                    limit=5,
-                    model_name=self.embedder.model_name,
-                    groups=sorted(principal.groups),
-                )
-                # SQL already applied the ACL; re-check before evidence is used.
-                rows = [row for row in rows if can_read(row, principal)]
-                rows = self.reranker.rerank(safe_question, rows)
-                ranked = [
-                    (
-                        SimpleNamespace(
-                            id=row["id"],
-                            tenant_id=row["tenant_id"],
-                            document_id=row["document_id"],
-                            index=row["chunk_index"],
-                            text=row["text"],
-                            created_at=row["created_at"],
-                            source=row["source"],
-                        ),
-                        float(row["score"]),
-                    )
-                    for row in rows
-                ]
-                result = query.query_ranked(
-                    safe_question, tenant_id, ranked, request_id=request.request_id
-                )
-            else:
-                readable = {row["document_id"] for row in self._visible_documents(principal)}
-                with self._lock:
-                    chunks = tuple(c for c in self._chunks if c.document_id in readable)
-                query = RagQueryPipeline(chunks)
-                result = query.query(question, tenant_id, request_id=request.request_id)
-        except UnsafeQueryError as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
-        answer = result.answer
-        extra: dict[str, Any] = {}
+        prior: tuple[ChatTurn, ...] = ()
         if is_chat:
             assert isinstance(session_id, str)
-            user_id = principal.user_id
-            prior = self.history.get(tenant_id, user_id, session_id)
-            if result.grounded:
-                answer = self.provider.generate(
-                    question, [citation.excerpt for citation in result.citations], prior
-                )
+            prior = self.history.get(tenant_id, principal.user_id, session_id)
+        try:
+            question = RagQueryPipeline(()).validate_query(question, tenant_id)
+            # Follow-ups such as "and for contractors?" are rewritten into a
+            # standalone query for retrieval; the model still sees the original.
+            search_query = self.provider.rewrite_query(question, prior) if prior else question
+            evidence = self._retrieve(principal, search_query)
+        except UnsafeQueryError as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+
+        answer, used = ABSTENTION, []
+        if evidence:
+            raw = self.provider.generate(question, [chunk.text for chunk, _ in evidence], prior)
+            candidate = strip_invalid_citations(raw, len(evidence))
+            used = cited_sources(candidate, len(evidence))
+            # An answer that cites nothing is not grounded; return the abstention.
+            if used:
+                answer = candidate
+        citations = []
+        for number in used:
+            chunk, score = evidence[number - 1]
+            citations.append(
+                {
+                    "source_number": number,
+                    "document_id": chunk.document_id,
+                    "source": chunk.source,
+                    "chunk_index": chunk.index,
+                    "score": round(score, 4),
+                    "excerpt": chunk.text[:240],
+                }
+            )
+        response: dict[str, Any] = {
+            "answer": answer,
+            "grounded": bool(used),
+            "citations": citations,
+        }
+        if is_chat:
+            assert isinstance(session_id, str)
             self.history.append(
                 tenant_id,
-                user_id,
+                principal.user_id,
                 session_id,
                 ChatTurn("user", question),
                 ChatTurn("assistant", answer),
             )
-            extra = {
-                "session_id": session_id,
-                "history_messages": len(self.history.get(tenant_id, user_id, session_id)),
-            }
-        return HTTPStatus.OK, {
-            "answer": answer,
-            "grounded": result.grounded,
-            "citations": [
-                {
-                    "document_id": citation.document_id,
-                    "source": citation.source,
-                    "chunk_index": citation.chunk_index,
-                    "score": citation.score,
-                    "excerpt": citation.excerpt,
-                }
-                for citation in result.citations
-            ],
-            **extra,
-        }
+            response["session_id"] = session_id
+            response["history_messages"] = len(
+                self.history.get(tenant_id, principal.user_id, session_id)
+            )
+            if search_query != question:
+                response["search_query"] = search_query
+        return HTTPStatus.OK, response
 
 
 class RequestHandler(BaseHTTPRequestHandler):

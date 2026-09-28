@@ -115,15 +115,30 @@ class RagQueryPipeline:
         )
         return sorted(candidates, key=lambda item: (-item[1], item[0].index))[: self.top_k]
 
+    def evidence(
+        self,
+        question: str,
+        tenant_id: str,
+        ranked_chunks: Sequence[tuple[ChunkLike, float]] | None = None,
+    ) -> list[tuple[ChunkLike, float]]:
+        """Validate, then return the top-k tenant chunks that pass the evidence gate.
+
+        With ``ranked_chunks`` (from a database search) those candidates are
+        gated; otherwise the in-memory lexical retriever supplies them.
+        """
+        safe_question = self.validate_query(question, tenant_id)
+        candidates = (
+            ranked_chunks if ranked_chunks is not None else self._retrieve(safe_question, tenant_id)
+        )
+        return [
+            (chunk, score)
+            for chunk, score in candidates[: self.top_k]
+            if chunk.tenant_id == tenant_id and score >= self.min_score
+        ]
+
     def query(self, question: str, tenant_id: str, request_id: str | None = None) -> QueryResult:
         """Return a grounded response, or an explicit abstention when evidence is weak."""
-        safe_question = self.validate_query(question, tenant_id)
-        grounded = [
-            (chunk, score)
-            for chunk, score in self._retrieve(safe_question, tenant_id)
-            if score >= self.min_score
-        ]
-        return self._build_result(grounded, request_id)
+        return self._build_result(self.evidence(question, tenant_id), request_id)
 
     def query_ranked(
         self,
@@ -133,13 +148,7 @@ class RagQueryPipeline:
         request_id: str | None = None,
     ) -> QueryResult:
         """Format already-ranked vector results using the same safety/grounding rules."""
-        self.validate_query(question, tenant_id)
-        grounded = [
-            (chunk, score)
-            for chunk, score in ranked_chunks[: self.top_k]
-            if chunk.tenant_id == tenant_id and score >= self.min_score
-        ]
-        return self._build_result(grounded, request_id)
+        return self._build_result(self.evidence(question, tenant_id, ranked_chunks), request_id)
 
     @staticmethod
     def _build_result(
