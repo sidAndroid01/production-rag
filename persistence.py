@@ -16,81 +16,6 @@ from typing import Any
 
 from embeddings import DIMENSIONS, MODEL_NAME
 
-SCHEMA_SQL = """
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS documents (
-    document_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    source TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ready',
-    chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, document_id),
-    UNIQUE (tenant_id, content_sha256)
-);
-
-CREATE TABLE IF NOT EXISTS chunks (
-    id UUID PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    document_id TEXT NOT NULL,
-    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
-    text TEXT NOT NULL,
-    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
-    embedding vector(384),
-    embedding_model TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, document_id, chunk_index),
-    FOREIGN KEY (tenant_id, document_id)
-        REFERENCES documents (tenant_id, document_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE chunks ADD COLUMN IF NOT EXISTS search_vector tsvector
-    GENERATED ALWAYS AS (to_tsvector('english', text)) STORED;
-
--- Upgrade databases created by earlier phases, where embedding was untyped.
-ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(384)
-    USING embedding::vector(384);
-
-CREATE INDEX IF NOT EXISTS chunks_tenant_document_index
-    ON chunks (tenant_id, document_id, chunk_index);
-CREATE INDEX IF NOT EXISTS documents_tenant_index ON documents (tenant_id);
-CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
-    ON chunks USING hnsw (embedding vector_cosine_ops)
-    WHERE embedding IS NOT NULL;
-CREATE INDEX IF NOT EXISTS chunks_search_vector_gin
-    ON chunks USING gin (search_vector);
-
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE documents FORCE ROW LEVEL SECURITY;
-ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'documents_tenant_policy') THEN
-        CREATE POLICY documents_tenant_policy ON documents
-            USING (tenant_id = current_setting('app.tenant_id', true))
-            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'chunks_tenant_policy') THEN
-        CREATE POLICY chunks_tenant_policy ON chunks
-            USING (tenant_id = current_setting('app.tenant_id', true))
-            WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
-    END IF;
-END $$;
-
-INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
-"""
-
 
 @dataclass(frozen=True, slots=True)
 class PersistResult:
@@ -115,9 +40,12 @@ class PostgresPersistence:
         return psycopg.connect(self.dsn)
 
     def initialize(self) -> None:
-        """Create the extension, tables, and indexes in one transaction."""
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(SCHEMA_SQL)
+        """Apply pending migrations; the DSN must belong to the schema owner."""
+        from migrate import apply_migrations
+
+        with self._connect() as connection:
+            connection.autocommit = True
+            apply_migrations(connection)
 
     @staticmethod
     def _set_tenant(cursor: Any, tenant_id: str) -> None:
@@ -308,19 +236,33 @@ class PostgresPersistence:
         candidates: dict[Any, dict[str, Any]] = {}
         for rank, row in enumerate(semantic_rows, start=1):
             candidates[row[0]] = {
-                "id": row[0], "tenant_id": row[1], "document_id": row[2],
-                "chunk_index": row[3], "text": row[4], "created_at": row[5],
-                "source": row[6], "semantic_score": float(row[7] or 0.0),
-                "keyword_score": 0.0, "semantic_rank": rank, "keyword_rank": None,
+                "id": row[0],
+                "tenant_id": row[1],
+                "document_id": row[2],
+                "chunk_index": row[3],
+                "text": row[4],
+                "created_at": row[5],
+                "source": row[6],
+                "semantic_score": float(row[7] or 0.0),
+                "keyword_score": 0.0,
+                "semantic_rank": rank,
+                "keyword_rank": None,
             }
         for rank, row in enumerate(keyword_rows, start=1):
             candidate = candidates.setdefault(
                 row[0],
                 {
-                    "id": row[0], "tenant_id": row[1], "document_id": row[2],
-                    "chunk_index": row[3], "text": row[4], "created_at": row[5],
-                    "source": row[6], "semantic_score": 0.0,
-                    "keyword_score": 0.0, "semantic_rank": None, "keyword_rank": rank,
+                    "id": row[0],
+                    "tenant_id": row[1],
+                    "document_id": row[2],
+                    "chunk_index": row[3],
+                    "text": row[4],
+                    "created_at": row[5],
+                    "source": row[6],
+                    "semantic_score": 0.0,
+                    "keyword_score": 0.0,
+                    "semantic_rank": None,
+                    "keyword_rank": rank,
                 },
             )
             candidate["keyword_score"] = float(row[7] or 0.0)
@@ -340,9 +282,7 @@ class PostgresPersistence:
             )
             # Scale reciprocal rank into approximately [0, 1] so it can be
             # combined with cosine and normalized full-text scores.
-            rank_signal = 61.0 * (
-                0.65 / (60 + semantic_rank) + 0.25 / (60 + keyword_rank)
-            )
+            rank_signal = 61.0 * (0.65 / (60 + semantic_rank) + 0.25 / (60 + keyword_rank))
             candidate["score"] = (
                 0.60 * candidate["semantic_score"]
                 + 0.25 * keyword_score
@@ -384,9 +324,9 @@ class PostgresPersistence:
                 "DELETE FROM documents WHERE tenant_id = %s AND document_id = %s",
                 (tenant_id.strip(), document_id.strip()),
             )
-            return cursor.rowcount == 1
+            return bool(cursor.rowcount == 1)
 
 
 def schema_path() -> Path:
-    """Return the path used by tooling that wants to inspect the schema."""
-    return Path(__file__).with_name("schema.sql")
+    """Return the directory of ordered SQL migrations that define the schema."""
+    return Path(__file__).with_name("migrations")

@@ -16,7 +16,7 @@ class IngestionJob:
 
 
 class IngestionWorker:
-    def __init__(self, handler: Callable[[dict[str, str]], None]) -> None:
+    def __init__(self, handler: Callable[[dict[str, str]], object]) -> None:
         self._handler = handler
         self._queue: queue.Queue[IngestionJob | None] = queue.Queue()
         self._status: dict[str, str] = {}

@@ -40,11 +40,14 @@ class OpenAICompatibleProvider(ModelProvider):
     def generate(self, question: str, context: Sequence[str], history: Sequence[ChatTurn]) -> str:
         sources = "\n\n".join(f"[{index}] {text}" for index, text in enumerate(context, 1))
         messages = [
-            {"role": "system", "content": (
-                "Answer only from the numbered sources. Cite factual claims as [n]. "
-                "If the sources do not contain the answer, say you do not know.\n\n"
-                f"Sources:\n{sources}"
-            )}
+            {
+                "role": "system",
+                "content": (
+                    "Answer only from the numbered sources. Cite factual claims as [n]. "
+                    "If the sources do not contain the answer, say you do not know.\n\n"
+                    f"Sources:\n{sources}"
+                ),
+            }
         ]
         messages.extend({"role": turn.role, "content": turn.content} for turn in history)
         messages.append({"role": "user", "content": question})

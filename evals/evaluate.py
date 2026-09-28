@@ -43,8 +43,11 @@ def _ndcg(relevance: list[int], cutoff: int) -> float:
 def evaluate(dataset: dict[str, Any], *, top_k: int = 5) -> EvaluationMetrics:
     chunks = tuple(
         SimpleNamespace(
-            text=row["text"], document_id=row["document_id"], index=row["chunk_index"],
-            tenant_id=row["tenant_id"], source=row["source"],
+            text=row["text"],
+            document_id=row["document_id"],
+            index=row["chunk_index"],
+            tenant_id=row["tenant_id"],
+            source=row["source"],
         )
         for row in dataset["chunks"]
     )

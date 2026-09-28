@@ -15,7 +15,9 @@ class FakeProvider(ModelProvider):
         return "model answer"
 
 
-def call(app: RagApiApplication, path: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+def call(
+    app: RagApiApplication, path: str, payload: dict[str, object]
+) -> tuple[int, dict[str, object]]:
     try:
         return app.handle("POST", path, {"x-api-key": "test-key"}, json.dumps(payload).encode())
     except Exception as exc:  # API errors are intentionally represented as status payloads here.
@@ -25,9 +27,18 @@ def call(app: RagApiApplication, path: str, payload: dict[str, object]) -> tuple
 def test_chat_history_is_bounded_and_reused() -> None:
     provider = FakeProvider()
     app = RagApiApplication(api_key="test-key", provider=provider, tenant_id="tenant-a")
-    document = {"filename": "policy.txt", "tenant_id": "tenant-a", "content": "Refunds are available within thirty days."}
+    document = {
+        "filename": "policy.txt",
+        "tenant_id": "tenant-a",
+        "content": "Refunds are available within thirty days.",
+    }
     assert call(app, "/v1/documents", document)[0] == 201
-    payload = {"tenant_id": "tenant-a", "user_id": "u1", "session_id": "s1", "question": "How long are refunds available?"}
+    payload = {
+        "tenant_id": "tenant-a",
+        "user_id": "u1",
+        "session_id": "s1",
+        "question": "How long are refunds available?",
+    }
     assert call(app, "/v1/chat", payload)[0] == 200
     assert call(app, "/v1/chat", payload)[0] == 200
     assert provider.histories == [0, 2]

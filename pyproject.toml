@@ -1,0 +1,52 @@
+[project]
+name = "production-rag"
+version = "0.11.0"
+description = "A production RAG system built phase by phase"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "psycopg[binary]>=3.2,<4",
+]
+
+[project.optional-dependencies]
+# Local CPU embeddings; required whenever DATABASE_URL is set.
+embeddings = ["fastembed>=0.7,<1"]
+# Optional learned cross-encoder; the deterministic reranker is the default.
+reranking = ["sentence-transformers>=3.0,<6"]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+]
+
+[tool.uv]
+# The root modules run in place; there is no wheel to build.
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "legacy/*", "docs/*", ".venv/*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["legacy", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["*.py", "evals"]
+exclude = ["^legacy/", "^docs/"]
+
+[[tool.mypy.overrides]]
+module = ["fastembed", "sentence_transformers", "pypdf"]
+ignore_missing_imports = true

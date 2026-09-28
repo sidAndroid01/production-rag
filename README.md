@@ -1,4 +1,4 @@
-# Production RAG — Phase 1 through Phase 6 foundations
+# Production RAG — built phase by phase
 
 This repository is being built phase by phase. **The published foundations now include document ingestion, a deterministic query flow, an authenticated API boundary, PostgreSQL persistence, API/database integration, local embeddings, and pgvector retrieval.** Hosted generation, evaluation, deployment, and remaining production controls will be added in later phases.
 
@@ -6,7 +6,7 @@ This repository is being built phase by phase. **The published foundations now i
 
 This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval.
 
-The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by `schema.sql` and `docker-compose.persistence.yml`. Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
+The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by the ordered SQL files in [`migrations/`](migrations/), the [`migrate.py`](migrate.py) runner, and [`compose.yaml`](compose.yaml). Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
 
 The API now supports an explicit tenant identity binding. Set `RAG_TENANT_ID` for a deployed API instance; requests whose body tenant differs from that authenticated identity are rejected. The body field remains visible in the learning API so the data flow is easy to inspect, but production authentication should derive it from an API-key or JWT claim rather than trusting a client-selected tenant.
 
@@ -188,13 +188,13 @@ The API layer handles transport concerns only. It does not add durable storage, 
 Set `DATABASE_URL` to switch the API from its in-memory fallback to PostgreSQL:
 
 ```bash
-export DATABASE_URL='postgresql://rag:rag-local-password@localhost:5432/rag'
+export DATABASE_URL='postgresql://rag_app:<RAG_APP_DB_PASSWORD>@localhost:5432/rag'
 export RAG_TENANT_ID='default'
-pip install "psycopg[binary]"
-python3 api.py
+uv sync --extra embeddings
+uv run python api.py
 ```
 
-At startup the API initializes the schema. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. The original integration loaded only the requested tenant's chunks into the lexical query pipeline; Phase 6 replaces this with direct pgvector similarity search. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
+`migrate.py` applies the schema as `rag_owner` and creates the restricted `rag_app` role (Phase 11). The API connects as `rag_app`; it never runs owner-only DDL. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
 
 This phase proves the application boundary survives process restarts and separates transport from storage. With the next phase enabled, it also uses local vector retrieval; without the database it keeps the lexical in-memory demo.
 
@@ -212,13 +212,13 @@ IngestResult
   → transaction commits
 ```
 
-The schema is in [`schema.sql`](schema.sql), and [`docker-compose.persistence.yml`](docker-compose.persistence.yml) runs a local PostgreSQL 17 instance with the pgvector image and a named volume. Docker is only the repeatable local runtime; the volume keeps database files when the container restarts.
+The schema now lives in [`migrations/001_schema.sql`](migrations/001_schema.sql), and [`compose.yaml`](compose.yaml) runs a local PostgreSQL 17 instance with the pgvector image and a named volume (Phase 11 consolidated both). Docker is only the repeatable local runtime; the volume keeps database files when the container restarts.
 
 Install the Python driver and start the database:
 
 ```bash
-pip install -r requirements-embeddings.txt
-docker compose -f docker-compose.persistence.yml up -d
+uv sync --extra embeddings
+docker compose up -d postgres migrate
 ```
 
 Use the repository:
@@ -228,8 +228,7 @@ from embeddings import LocalFastEmbedder
 from persistence import PostgresPersistence
 from rag import RagIngestionPipeline
 
-store = PostgresPersistence("postgresql://rag:rag-local-password@localhost:5432/rag")
-store.initialize()  # safe to run repeatedly
+store = PostgresPersistence("postgresql://rag_app:<RAG_APP_DB_PASSWORD>@localhost:5432/rag")
 result = RagIngestionPipeline().ingest(
     b"Refunds are available within thirty days.", "policy.txt", "default"
 )
@@ -260,7 +259,7 @@ The vector column is now constrained to the selected model's 384 dimensions, wit
 Install the local runtime dependencies:
 
 ```bash
-pip install -r requirements-embeddings.txt
+uv sync --extra embeddings
 ```
 
 With `DATABASE_URL` configured, ingestion is now:
@@ -298,7 +297,7 @@ question
 
 ## Phase 8: tenant database security and document lifecycle
 
-PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. The schema records migration version `2` in `schema_migrations` so later changes can be applied as explicit migrations. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
+PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. Phase 11 replaces the original version marker with named migration files tracked in `applied_migrations`. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
 
 ## Phase 9: token-aware ingestion and retrieval evaluation
 
@@ -308,7 +307,37 @@ The chunker now targets token-like whitespace units instead of character counts,
 
 The chat path is now available at `POST /v1/chat`. It keeps bounded history by tenant, user, and session, then sends the retrieved evidence and previous turns to a model provider. By default the repository uses a free extractive fallback. To use a personal OpenAI-compatible provider, set `RAG_MODEL_BASE_URL`, `RAG_MODEL_API_KEY`, and `RAG_MODEL_NAME`; this also works with Ollama, vLLM, and LM Studio endpoints. The API never stores the key in the repository.
 
-`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation. `reranker.py` can load a local Sentence Transformers cross-encoder when `requirements-reranking.txt` is installed, and falls back to the deterministic reranker when it is unavailable.
+`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation. `reranker.py` can load a local Sentence Transformers cross-encoder when the `reranking` extra is installed (`uv sync --extra reranking`), and falls back to the deterministic reranker when it is unavailable.
+
+## Phase 11: one runnable, verified application
+
+Before adding features, the repository needed to prove that what it ships is what it tests. Three things were out of step: an uncommitted FastAPI scaffold had grown next to the phase modules and was what the local Docker and CI configuration built; the local `pyproject.toml` only put that scaffold on the import path, so the committed phase tests could not even be collected; and the schema existed twice (in `schema.sql` and as a string in `persistence.py`) with no way to apply later changes.
+
+```text
+migrations/NNN_*.sql            ordered, reviewed schema changes
+  → migrate.py (owner role)     applies each pending file once, in its own transaction
+  → applied_migrations          records what ran; an advisory lock serializes deploys
+  → rag_app password from env   no database password is committed
+api.py (rag_app role)           never runs DDL; subject to row-level security
+```
+
+Run the whole stack:
+
+```bash
+cp .env.example .env        # set the three passwords/keys
+docker compose up --build   # postgres → migrate (one-shot) → api
+curl localhost:8000/health/ready
+```
+
+What changed:
+
+- The scaffold moved to [`legacy/`](legacy/) unchanged, with the guide that described it. It is outside the build, lint, type check, and tests.
+- `pyproject.toml` now describes these modules: `psycopg` is a core dependency, and `embeddings`, `reranking`, and `dev` are extras locked in `uv.lock`. `requirements-*.txt` are replaced by the extras.
+- [`migrate.py`](migrate.py) applies [`migrations/`](migrations/) as the owner. `002_create_app_role.sql` creates `rag_app` without a password; `RAG_APP_DB_PASSWORD` sets it at deploy time.
+- The [`Dockerfile`](Dockerfile) installs from the lockfile, bakes the embedding model into the image so the read-only container never downloads at request time, and runs `api.py` as a non-root user. `RAG_HOST` controls the bind address (loopback by default, `0.0.0.0` in the container).
+- [CI](.github/workflows/ci.yml) starts a pgvector service, runs the migrations, and executes the whole suite, including the row-level-security integration test as the restricted role. It also builds the image.
+
+**Android-developer translation:** this is the equivalent of making sure the APK you upload is built from the module your unit tests cover, and moving Room schema changes from "recreate the database" to numbered `Migration(n, n+1)` objects that run once per install.
 
 ## Phase plan
 
@@ -324,9 +353,14 @@ The repository will grow in this order:
 8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
 9. **Phase 9 — ingestion and evaluation (this phase):** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
 10. **Phase 10 — pluggable chat and platform adapters (this phase):** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
-11. **Phase 11 — retrieval hardening:** versioned migration tooling, persistent ACL metadata, deduplication, model-aware limits, and query transformation.
-12. **Phase 12 — generation and safety:** robust model gateway, citation entailment, PII controls, and policy enforcement.
-13. **Phase 13 — operations and deployment:** durable queues, tracing, cost and latency budgets, retries, rate limiting, backups, and production infrastructure.
+11. **Phase 11 — runnable and verified (this phase):** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
+12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
+13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
+14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
+15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
+16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
+17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
+18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

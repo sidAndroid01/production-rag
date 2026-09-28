@@ -60,8 +60,12 @@ class FakePersistence:
         return [row for row in self.chunks if row["tenant_id"] == tenant_id][:limit]
 
     def search_hybrid(
-        self, tenant_id: str, query_text: str, query_embedding: list[float],
-        limit: int, model_name: str
+        self,
+        tenant_id: str,
+        query_text: str,
+        query_embedding: list[float],
+        limit: int,
+        model_name: str,
     ) -> list[dict[str, object]]:
         del query_text, query_embedding, model_name
         return [row for row in self.chunks if row["tenant_id"] == tenant_id][:limit]
@@ -202,12 +206,16 @@ def test_configured_tenant_identity_rejects_body_tenant_mismatch() -> None:
 def test_in_memory_document_delete_is_tenant_scoped() -> None:
     app = RagApiApplication(api_key="test-key", tenant_id="tenant-a")
     status, created = _call(
-        app, "POST", "/v1/documents",
+        app,
+        "POST",
+        "/v1/documents",
         {"filename": "policy.txt", "tenant_id": "tenant-a", "content": "evidence"},
     )
     assert status == 201
     status, denied = _call(
-        app, "DELETE", f"/v1/documents/{created['document_id']}",
+        app,
+        "DELETE",
+        f"/v1/documents/{created['document_id']}",
         {"tenant_id": "tenant-b"},
     )
     assert status == 403

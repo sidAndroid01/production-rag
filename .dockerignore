@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+.env
+.env.*
+**/__pycache__
+.*_cache
+.coverage
+legacy
+docs
+tests

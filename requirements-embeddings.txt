@@ -1,3 +1,0 @@
-# Local CPU inference; model weights are downloaded once and cached locally.
-fastembed>=0.7,<1
-psycopg[binary]>=3.2,<4

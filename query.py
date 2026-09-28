@@ -17,11 +17,16 @@ from uuid import uuid4
 
 
 class ChunkLike(Protocol):
-    text: str
-    document_id: str
-    index: int
-    tenant_id: str
-    source: str
+    @property
+    def text(self) -> str: ...
+    @property
+    def document_id(self) -> str: ...
+    @property
+    def index(self) -> int: ...
+    @property
+    def tenant_id(self) -> str: ...
+    @property
+    def source(self) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)

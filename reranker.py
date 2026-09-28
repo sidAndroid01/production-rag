@@ -27,13 +27,18 @@ class CrossEncoderReranker:
             return []
         try:
             scores = self._load().predict([(question, row["text"]) for row in rows])
-            ranked = [dict(row, score=float(score)) for row, score in zip(rows, scores, strict=True)]
+            ranked = [
+                dict(row, score=float(score)) for row, score in zip(rows, scores, strict=True)
+            ]
         except RuntimeError:
             query_terms = set(re.findall(r"[a-zA-Z0-9]+", question.lower()))
             ranked = [
-                dict(row, score=float(row.get("score", 0.0)) + 0.1 * len(
-                    query_terms & set(re.findall(r"[a-zA-Z0-9]+", row["text"].lower()))
-                ))
+                dict(
+                    row,
+                    score=float(row.get("score", 0.0))
+                    + 0.1
+                    * len(query_terms & set(re.findall(r"[a-zA-Z0-9]+", row["text"].lower()))),
+                )
                 for row in rows
             ]
         return sorted(ranked, key=lambda row: -row["score"])

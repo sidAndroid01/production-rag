@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from collections.abc import Sequence
 
 from providers import ChatTurn
 
@@ -25,7 +24,7 @@ class ChatHistoryStore:
         with self._lock:
             messages = self._messages[(tenant_id, user_id, session_id)]
             messages.extend(turns)
-            del messages[:-self.max_messages]
+            del messages[: -self.max_messages]
 
     def clear(self, tenant_id: str, user_id: str, session_id: str) -> None:
         with self._lock:

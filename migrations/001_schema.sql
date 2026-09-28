@@ -1,5 +1,5 @@
--- Phase 4 schema for PostgreSQL + pgvector.
--- The canonical copy is also available as persistence.SCHEMA_SQL.
+-- Documents, chunks, indexes and tenant row-level security.
+-- Idempotent so databases created by earlier phases upgrade in place.
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -47,11 +47,6 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
 CREATE INDEX IF NOT EXISTS chunks_search_vector_gin
     ON chunks USING gin (search_vector);
 
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents FORCE ROW LEVEL SECURITY;
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
@@ -70,5 +65,3 @@ BEGIN
             WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
     END IF;
 END $$;
-
-INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;

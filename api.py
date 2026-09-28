@@ -128,7 +128,12 @@ class RagApiApplication:
             document_id_to_delete = path.removeprefix("/v1/documents/").strip()
             if not document_id_to_delete:
                 raise ApiError(HTTPStatus.NOT_FOUND, "document route not found")
-        elif method != "POST" or path not in {"/v1/documents", "/v1/query", "/v1/chat", "/v1/ingestion/jobs"}:
+        elif method != "POST" or path not in {
+            "/v1/documents",
+            "/v1/query",
+            "/v1/chat",
+            "/v1/ingestion/jobs",
+        }:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
 
         self._authenticate(headers)
@@ -138,12 +143,18 @@ class RagApiApplication:
 
         if path == "/v1/ingestion/jobs":
             tenant_id = self._tenant_from_payload(payload)
-            job = self.worker.submit({
-                "filename": str(payload.get("filename", "")),
-                "content": str(payload.get("content", "")),
-                "tenant_id": tenant_id,
-            })
-            return HTTPStatus.ACCEPTED, {"job_id": job.id, "status": "queued", "request_id": request_id}
+            job = self.worker.submit(
+                {
+                    "filename": str(payload.get("filename", "")),
+                    "content": str(payload.get("content", "")),
+                    "tenant_id": tenant_id,
+                }
+            )
+            return HTTPStatus.ACCEPTED, {
+                "job_id": job.id,
+                "status": "queued",
+                "request_id": request_id,
+            }
 
         if document_id_to_delete is not None:
             tenant_id = self._tenant_from_payload(payload)
@@ -153,7 +164,8 @@ class RagApiApplication:
                 with self._lock:
                     before = len(self._chunks)
                     self._chunks = [
-                        chunk for chunk in self._chunks
+                        chunk
+                        for chunk in self._chunks
                         if not (
                             chunk.tenant_id == tenant_id
                             and chunk.document_id == document_id_to_delete
@@ -194,7 +206,9 @@ class RagApiApplication:
                 )
                 principal = Principal(
                     user_id=str(payload.get("user_id", "anonymous")),
-                    groups=frozenset(payload.get("groups", [])) if isinstance(payload.get("groups", []), list) else frozenset(),
+                    groups=frozenset(payload.get("groups", []))
+                    if isinstance(payload.get("groups", []), list)
+                    else frozenset(),
                 )
                 rows = [row for row in rows if can_read(row, principal)]
                 rows = self.reranker.rerank(safe_question, rows)
@@ -232,14 +246,21 @@ class RagApiApplication:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "session_id is required for chat")
             user_id = str(payload.get("user_id", "anonymous"))
             prior = self.history.get(tenant_id, user_id, session_id)
-            answer = self.provider.generate(
-                question,
-                [citation.excerpt for citation in result.citations],
-                prior,
-            ) if result.grounded else result.answer
+            answer = (
+                self.provider.generate(
+                    question,
+                    [citation.excerpt for citation in result.citations],
+                    prior,
+                )
+                if result.grounded
+                else result.answer
+            )
             self.history.append(
-                tenant_id, user_id, session_id,
-                ChatTurn("user", question), ChatTurn("assistant", answer),
+                tenant_id,
+                user_id,
+                session_id,
+                ChatTurn("user", question),
+                ChatTurn("assistant", answer),
             )
         return HTTPStatus.OK, {
             "answer": answer,
@@ -255,7 +276,18 @@ class RagApiApplication:
                 }
                 for citation in result.citations
             ],
-            **({"session_id": session_id, "history_messages": len(self.history.get(tenant_id, str(payload.get("user_id", "anonymous")), session_id))} if is_chat else {}),
+            **(
+                {
+                    "session_id": session_id,
+                    "history_messages": len(
+                        self.history.get(
+                            tenant_id, str(payload.get("user_id", "anonymous")), str(session_id)
+                        )
+                    ),
+                }
+                if is_chat
+                else {}
+            ),
         }
 
 
@@ -295,21 +327,21 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def run() -> None:
     port = int(os.getenv("PORT", "8000"))
+    # Loopback by default; containers set RAG_HOST=0.0.0.0 to accept traffic.
+    host = os.getenv("RAG_HOST", "127.0.0.1")
     dsn = os.getenv("DATABASE_URL")
     persistence = PostgresPersistence(dsn) if dsn else None
-    if persistence is not None:
-        configured_tenant = os.getenv("RAG_TENANT_ID")
-        if not configured_tenant or not configured_tenant.strip():
-            raise RuntimeError("RAG_TENANT_ID is required when DATABASE_URL is configured")
-        persistence.initialize()
-    else:
-        configured_tenant = os.getenv("RAG_TENANT_ID")
+    configured_tenant = os.getenv("RAG_TENANT_ID")
+    if persistence is not None and (not configured_tenant or not configured_tenant.strip()):
+        raise RuntimeError("RAG_TENANT_ID is required when DATABASE_URL is configured")
+    # Schema changes are applied separately by migrate.py as the owner role;
+    # the API's restricted role cannot run DDL.
     RequestHandler.application = RagApiApplication(
         persistence=persistence,
         tenant_id=configured_tenant,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", port), RequestHandler)
-    print(f"RAG API listening on http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer((host, port), RequestHandler)
+    print(f"RAG API listening on http://{host}:{port}")
     server.serve_forever()
 
 
