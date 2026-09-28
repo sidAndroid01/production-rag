@@ -1,14 +1,35 @@
-# Production RAG — Phase 1 through Phase 6 foundations
+# Production RAG — built phase by phase
 
-This repository is being built phase by phase. **The published foundations now include document ingestion, a deterministic query flow, an authenticated API boundary, PostgreSQL persistence, API/database integration, local embeddings, and pgvector retrieval.** Hosted generation, evaluation, deployment, and remaining production controls will be added in later phases.
+A multi-tenant retrieval-augmented generation API, built in visible phases so every production concern is added, explained, and tested one at a time. It runs on PostgreSQL + pgvector with local embeddings, hybrid retrieval, row-level tenant security, group ACLs, grounded and cited answers, a resilient model gateway, versioned PDF/HTML/Markdown documents, a durable job queue, an evaluation gate in CI, and structured logs and metrics.
+
+## Quick start
+
+```bash
+cp .env.example .env          # set POSTGRES_PASSWORD, RAG_APP_DB_PASSWORD, RAG_API_KEY
+docker compose up --build     # postgres → migrations → api on http://localhost:8000
+
+curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/documents \
+  -d '{"filename": "policy.txt", "content": "Refunds are available within 30 days."}'
+curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
+  -d '{"question": "How long do I have to get a refund?"}'
+```
+
+Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/documents` | upload `content` (text) or `content_base64` (PDF/HTML/Markdown/text); optional `allowed_groups` |
+| `GET /v1/documents[?include_superseded=true]`, `GET` / `DELETE /v1/documents/{id}` | list, inspect, delete |
+| `POST /v1/query` | one question → grounded answer with cited sources (and pages) |
+| `POST /v1/chat` | multi-turn with `session_id`; follow-ups are rewritten for retrieval |
+| `POST /v1/ingestion/jobs`, `GET /v1/ingestion/jobs/{id}` | background ingestion and its status |
+| `GET /health/live`, `GET /health/ready`, `GET /metrics` | probes and Prometheus metrics |
 
 ## Repository history and canonical implementation
 
-This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval.
+This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval. Phases 7–10 add hybrid retrieval, database security, evaluation, and chat; Phases 11–18 make the whole system correct, measurable, and operable. The [phase plan](#phase-plan) lists each one.
 
-The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by `schema.sql` and `docker-compose.persistence.yml`. Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
-
-The API now supports an explicit tenant identity binding. Set `RAG_TENANT_ID` for a deployed API instance; requests whose body tenant differs from that authenticated identity are rejected. The body field remains visible in the learning API so the data flow is easy to inspect, but production authentication should derive it from an API-key or JWT claim rather than trusting a client-selected tenant.
+The canonical implementation is the root-level modules (`rag.py`, `query.py`, `api.py`, `persistence.py`, `embeddings.py`, and the modules later phases add), supported by the ordered SQL files in [`migrations/`](migrations/), the [`migrate.py`](migrate.py) runner, and [`compose.yaml`](compose.yaml). Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration. The sections below keep each phase's original explanation; where a later phase changed a behavior, the later section says so. For example, identity has come from the API key rather than the request body since Phase 13.
 
 ## What this phase does
 
@@ -188,13 +209,13 @@ The API layer handles transport concerns only. It does not add durable storage, 
 Set `DATABASE_URL` to switch the API from its in-memory fallback to PostgreSQL:
 
 ```bash
-export DATABASE_URL='postgresql://rag:rag-local-password@localhost:5432/rag'
+export DATABASE_URL='postgresql://rag_app:<RAG_APP_DB_PASSWORD>@localhost:5432/rag'
 export RAG_TENANT_ID='default'
-pip install "psycopg[binary]"
-python3 api.py
+uv sync --extra embeddings
+uv run python api.py
 ```
 
-At startup the API initializes the schema. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. The original integration loaded only the requested tenant's chunks into the lexical query pipeline; Phase 6 replaces this with direct pgvector similarity search. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
+`migrate.py` applies the schema as `rag_owner` and creates the restricted `rag_app` role (Phase 11). The API connects as `rag_app`; it never runs owner-only DDL. Document ingestion writes the document and all chunks through `PostgresPersistence.persist()`. The readiness endpoint checks the database connection when `DATABASE_URL` is configured. Without `DATABASE_URL`, the API remains an intentionally ephemeral in-memory demo.
 
 This phase proves the application boundary survives process restarts and separates transport from storage. With the next phase enabled, it also uses local vector retrieval; without the database it keeps the lexical in-memory demo.
 
@@ -212,13 +233,13 @@ IngestResult
   → transaction commits
 ```
 
-The schema is in [`schema.sql`](schema.sql), and [`docker-compose.persistence.yml`](docker-compose.persistence.yml) runs a local PostgreSQL 17 instance with the pgvector image and a named volume. Docker is only the repeatable local runtime; the volume keeps database files when the container restarts.
+The schema now lives in [`migrations/001_schema.sql`](migrations/001_schema.sql), and [`compose.yaml`](compose.yaml) runs a local PostgreSQL 17 instance with the pgvector image and a named volume (Phase 11 consolidated both). Docker is only the repeatable local runtime; the volume keeps database files when the container restarts.
 
 Install the Python driver and start the database:
 
 ```bash
-pip install -r requirements-embeddings.txt
-docker compose -f docker-compose.persistence.yml up -d
+uv sync --extra embeddings
+docker compose up -d postgres migrate
 ```
 
 Use the repository:
@@ -228,8 +249,7 @@ from embeddings import LocalFastEmbedder
 from persistence import PostgresPersistence
 from rag import RagIngestionPipeline
 
-store = PostgresPersistence("postgresql://rag:rag-local-password@localhost:5432/rag")
-store.initialize()  # safe to run repeatedly
+store = PostgresPersistence("postgresql://rag_app:<RAG_APP_DB_PASSWORD>@localhost:5432/rag")
 result = RagIngestionPipeline().ingest(
     b"Refunds are available within thirty days.", "policy.txt", "default"
 )
@@ -260,7 +280,7 @@ The vector column is now constrained to the selected model's 384 dimensions, wit
 Install the local runtime dependencies:
 
 ```bash
-pip install -r requirements-embeddings.txt
+uv sync --extra embeddings
 ```
 
 With `DATABASE_URL` configured, ingestion is now:
@@ -298,17 +318,276 @@ question
 
 ## Phase 8: tenant database security and document lifecycle
 
-PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. The schema records migration version `2` in `schema_migrations` so later changes can be applied as explicit migrations. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
+PostgreSQL now enables and forces row-level security on both `documents` and `chunks`. Every repository transaction sets the trusted `app.tenant_id` session value before reading or writing, and policies reject rows belonging to another tenant even if an application query is accidentally broadened. Phase 11 replaces the original version marker with named migration files tracked in `applied_migrations`. `DELETE /v1/documents/{document_id}` removes a tenant-owned document and relies on the foreign-key cascade to remove its chunks.
 
 ## Phase 9: token-aware ingestion and retrieval evaluation
 
-The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) runs the versioned [`golden-v1.json`](evals/datasets/golden-v1.json) set and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
+The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) ran the first versioned golden set (replaced by `golden-v2.json` in Phase 15) and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
 
 ## Phase 10: pluggable chat, workers, permissions, and learned reranking
 
 The chat path is now available at `POST /v1/chat`. It keeps bounded history by tenant, user, and session, then sends the retrieved evidence and previous turns to a model provider. By default the repository uses a free extractive fallback. To use a personal OpenAI-compatible provider, set `RAG_MODEL_BASE_URL`, `RAG_MODEL_API_KEY`, and `RAG_MODEL_NAME`; this also works with Ollama, vLLM, and LM Studio endpoints. The API never stores the key in the repository.
 
-`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation. `reranker.py` can load a local Sentence Transformers cross-encoder when `requirements-reranking.txt` is installed, and falls back to the deterministic reranker when it is unavailable.
+`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation (enforced from Phase 13). `reranker.py` can load a local Sentence Transformers cross-encoder when the `reranking` extra is installed (`uv sync --extra reranking`), and falls back to the deterministic reranker when it is unavailable.
+
+## Phase 11: one runnable, verified application
+
+Before adding features, the repository needed to prove that what it ships is what it tests. Three things were out of step: an uncommitted FastAPI scaffold had grown next to the phase modules and was what the local Docker and CI configuration built; the local `pyproject.toml` only put that scaffold on the import path, so the committed phase tests could not even be collected; and the schema existed twice (in `schema.sql` and as a string in `persistence.py`) with no way to apply later changes.
+
+```text
+migrations/NNN_*.sql            ordered, reviewed schema changes
+  → migrate.py (owner role)     applies each pending file once, in its own transaction
+  → applied_migrations          records what ran; an advisory lock serializes deploys
+  → rag_app password from env   no database password is committed
+api.py (rag_app role)           never runs DDL; subject to row-level security
+```
+
+Run the whole stack:
+
+```bash
+cp .env.example .env        # set the three passwords/keys
+docker compose up --build   # postgres → migrate (one-shot) → api
+curl localhost:8000/health/ready
+```
+
+What changed:
+
+- The scaffold moved to [`legacy/`](legacy/) unchanged, with the guide that described it. It is outside the build, lint, type check, and tests.
+- `pyproject.toml` now describes these modules: `psycopg` is a core dependency, and `embeddings`, `reranking`, and `dev` are extras locked in `uv.lock`. `requirements-*.txt` are replaced by the extras.
+- [`migrate.py`](migrate.py) applies [`migrations/`](migrations/) as the owner. `002_create_app_role.sql` creates `rag_app` without a password; `RAG_APP_DB_PASSWORD` sets it at deploy time.
+- The [`Dockerfile`](Dockerfile) installs from the lockfile, bakes the embedding model into the image so the read-only container never downloads at request time, and runs `api.py` as a non-root user. `RAG_HOST` controls the bind address (loopback by default, `0.0.0.0` in the container).
+- [CI](.github/workflows/ci.yml) starts a pgvector service, runs the migrations, and executes the whole suite, including the row-level-security integration test as the restricted role. It also builds the image.
+
+**Android-developer translation:** this is the equivalent of making sure the APK you upload is built from the module your unit tests cover, and moving Room schema changes from "recreate the database" to numbered `Migration(n, n+1)` objects that run once per install.
+
+## Phase 12: API correctness
+
+Phase 10 grew the API faster than its dispatch code. The HTTP handler only implemented `do_GET` and `do_POST`, so `DELETE /v1/documents/{id}` worked in unit tests that called `handle()` directly but returned `501` to every real client. Jobs could be submitted but their status could not be read, a failing job recorded only `"failed"`, and the handler object was created at import time, which started a worker thread whenever any module imported `api.py`.
+
+`api.py` now has a small route table instead of a chain of `if` statements:
+
+```text
+(method, path pattern) → handler method
+  path matches, method does not → 405
+  nothing matches               → 404
+  protected route               → API key checked before the body is parsed
+```
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/documents` | list the tenant's documents |
+| `GET /v1/documents/{id}` | one document's metadata |
+| `DELETE /v1/documents/{id}` | delete a document and its chunks (now reachable over HTTP) |
+| `GET /v1/ingestion/jobs/{id}` | job status, result, and failure reason; visible only to the submitting tenant |
+
+Other corrections:
+
+- Identical uploads return `200` with `already_existed: true` in memory as well as in PostgreSQL, so re-uploading no longer duplicates evidence in answers. A new upload returns `201`.
+- Empty documents are rejected with `422` in both storage modes.
+- Job input is validated before it is queued; a job that fails later records why (input errors verbatim, unexpected errors as a generic message with the full traceback in the log).
+- The request ID is echoed in an `x-request-id` response header; the body length is checked against the limit before reading.
+- A new PostgreSQL integration suite found that `list_chunks()` had always failed on a real database (`created_at` was ambiguous across the join). It is fixed and now covered.
+
+**Android-developer translation:** the route table is a navigation graph: each destination is declared once, and an unknown deep link has a defined result instead of falling through to whatever handler happens to be last.
+
+## Phase 13: server-side identity and document ACLs
+
+Until now the client chose its own identity. `tenant_id`, `user_id`, and `groups` all came from the JSON body; one shared API key admitted everyone; and a deployment could only serve the single tenant pinned by `RAG_TENANT_ID`. The group ACL in `permissions.py` read an `allowed_groups` field that did not exist in the schema, so it allowed every row, and a caller could have claimed any group anyway.
+
+```text
+x-api-key
+  → SHA-256 digest → server-side key table → Principal(tenant_id, user_id, groups)
+  → body tenant_id, if present, must equal the principal's (else 403)
+  → SQL: tenant RLS + (no ACL OR ACL ∩ groups) before LIMIT
+  → Python: can_read() re-checks each row before it becomes evidence
+```
+
+- [`auth.py`](auth.py) maps keys to principals. Keys are stored only as SHA-256 digests in the file named by `RAG_API_KEYS_FILE`; [`scripts/create_api_key.py`](scripts/create_api_key.py) generates a key and its entry. Without a key file, a single `RAG_API_KEY` is bound to `RAG_TENANT_ID` for local use, and `APP_ENV=production` refuses to start with the built-in development key.
+- One process now serves any number of tenants: each request runs as its key's tenant.
+- [`migrations/003_document_acl.sql`](migrations/003_document_acl.sql) adds `documents.allowed_groups` (empty means tenant-wide). Uploads accept `"allowed_groups": ["hr"]`.
+- The ACL is applied in SQL for vector search, keyword search, listing, get, and delete, before `LIMIT`. Filtering only after retrieval would let restricted rows occupy the top-k slots and leave an authorized user with no evidence. A restricted document is indistinguishable from a missing one (`404`) to users outside its groups.
+- Body `user_id` and `groups` are ignored. Chat history is keyed by the authenticated user.
+
+```bash
+python scripts/create_api_key.py --tenant acme --user alice --groups hr
+# add the printed entry to secrets/api-keys.json, then set RAG_API_KEYS_FILE
+```
+
+Deduplication is per tenant and content: re-uploading identical bytes with a different ACL returns the existing document unchanged. Changing a document's ACL is a delete and re-upload for now.
+
+**Android-developer translation:** this is the difference between trusting a `userId` extra in an `Intent` and reading the signed-in account from the server session. The client may say who it is; only the credential decides.
+
+## Phase 14: grounded generation
+
+Phase 10 connected a model, but the answer contract around it was loose:
+
+| Problem | Effect |
+| --- | --- |
+| Retrieved chunks were placed in the **system** message | injected document text gained the highest instruction priority |
+| The model received each chunk's 240-character citation excerpt | answers were generated from truncated evidence |
+| Every retrieved hit was returned as a citation | the response claimed support the answer never used |
+| Retrieval used only the latest message | "How often?" after "How are contractors paid?" searched for "How often?" |
+| Cross-encoder logits (about −10 to +10) met a 0.10 threshold meant for cosine | relevant chunks with negative logits were dropped, irrelevant positive ones kept |
+| `/v1/query` never used the configured model | only chat benefited from generation |
+
+The answer path is now the same for query and chat:
+
+```text
+question → validate
+  → (chat) rewrite follow-up into a standalone search query
+  → hybrid retrieval → ACL → rerank (scores in [0, 1]) → evidence gate
+  → model: system rules | history | user: <sources>[1..n] full text</sources> + question
+  → drop citation markers that point at no source
+  → keep only the sources the answer cites; no valid citation → abstain
+```
+
+- [`providers.py`](providers.py) owns the grounded-answer contract: the system prompt holds only rules; sources travel as delimited data in the user turn, and delimiter look-alikes inside documents are neutralized. `cited_sources()` and `strip_invalid_citations()` turn `[n]` markers into the response's `citations`, each with a `source_number` that matches the marker in the text.
+- An answer with no valid citation is replaced by the standard abstention and reported as `grounded: false`. A fluent but uncited answer is treated as unsupported.
+- `rewrite_query()` resolves follow-ups before retrieval. The OpenAI-compatible provider asks the model; the extractive provider (and the model path, if that call fails) prepends the previous user question. Chat responses include `search_query` when it differs from the question.
+- [`reranker.py`](reranker.py) passes cross-encoder logits through a sigmoid and keeps the fallback score within [0, 1], so one threshold means the same thing on both paths. A missing `sentence-transformers` is detected once instead of on every query.
+
+This is citation *alignment*, not entailment: the response now cites exactly what the answer claims to use, but whether each cited sentence supports its claim is measured in Phase 15's evaluation rather than verified per request.
+
+**Android-developer translation:** the system prompt is like your app's manifest permissions and the sources are like content from a `ContentProvider` you do not own: you render it, but it never gets to declare permissions.
+
+## Phase 15: evaluation that counts
+
+Phase 9's golden set had four pre-chunked snippets and scored only the in-memory lexical retriever; it could not see the pgvector path, the evidence gate, generation, or citations. [`golden-v2.json`](evals/datasets/golden-v2.json) is a 15-document policy corpus with 50 questions: 34 literal, 6 paraphrased with little shared vocabulary ("Can I work from home?" against "Remote work is allowed…"), and 10 unanswerable questions that must abstain.
+
+[`evals/evaluate.py`](evals/evaluate.py) now drives the real `RagApiApplication`: documents go through `POST /v1/documents` and questions through `POST /v1/query`, so ingestion, identity, ACLs, hybrid retrieval, both evidence gates, generation, and citation alignment are measured together.
+
+| Group | Metrics |
+| --- | --- |
+| Retrieval (answerable) | Recall@1/3/5, MRR, nDCG@5, paraphrase Recall@5 |
+| Answers | answer rate, abstention accuracy on unanswerable, citation precision, expected-term recall |
+| Calibration | the configured gate and the threshold that best separates answerable from unanswerable top scores |
+| Operations | `/v1/query` latency p50/p95 |
+
+```bash
+make eval                                                   # memory backend, with --check
+RAG_EVAL_DSN=postgresql://rag_app:...@localhost:5432/rag \
+  uv run python -m evals.evaluate --backend postgres --check
+uv run python -m evals.evaluate --provider configured       # your RAG_MODEL_* model (costs tokens)
+```
+
+The first run exposed real defects, which this phase fixes:
+
+| Finding | Fix | Hybrid before → after |
+| --- | --- | --- |
+| The 0.10 gate was designed for lexical scores; every hybrid score is above 0.3, so the API **never** abstained | per-backend default gates, calibrated from the score distributions: `0.40` hybrid, `0.15` lexical (`RAG_MIN_SCORE` overrides) | abstention 0.0 → 0.9 |
+| Two of every three citations were off-topic runners-up | a relative gate keeps only chunks within 80% of the best hit (`RAG_RELATIVE_SCORE`) | citation precision 0.34 → 0.94 |
+| Lexical scoring counted "the", "is", "do", so unrelated questions cleared the gate | stopwords are ignored by the lexical scorer | lexical abstention 0.4 → 0.8, paraphrase recall 0.67 → 1.0 |
+
+Current results with the free extractive answerer:
+
+| Metric | Memory (lexical) | PostgreSQL (hybrid) |
+| --- | --- | --- |
+| Recall@1 | 0.825 | 1.0 |
+| Paraphrase Recall@5 | 1.0 | 1.0 |
+| Answer rate | 0.85 | 1.0 |
+| Abstention accuracy | 0.8 | 0.9 |
+| Citation precision | 0.91 | 0.94 |
+| Latency p95 | < 1 ms | ≈ 17 ms |
+
+CI runs both backends with `--check` against [`evals/thresholds.json`](evals/thresholds.json) and fails the build on regression. Two honest limits: the corpus is small enough that each document is one chunk, so these numbers say little about long-document chunking; and with an LLM provider, citation precision measures alignment, not entailment. Grow the dataset (and recalibrate) before trusting the gates on a different corpus.
+
+**Android-developer translation:** this is a macrobenchmark plus screenshot tests for answers. Unit tests prove a function returns; the evaluation proves the user-visible result stayed good, and CI blocks the merge when it does not.
+
+## Phase 16: model gateway
+
+A hosted model is a remote dependency that times out, rate-limits, and has outages. Until now one failed call surfaced as `500 internal server error`, nothing bounded how much context or history was sent, and nothing recorded tokens or cost.
+
+[`gateway.py`](gateway.py) sits between the API and the providers:
+
+```text
+evidence + history
+  → budget: pack sources in rank order into RAG_MAX_CONTEXT_TOKENS; keep recent history
+  → for each provider (primary, then RAG_FALLBACK_MODEL_*):
+       circuit open? skip it
+       call → transient failure (timeout, connection, 429, 5xx)?
+                retry with full-jitter exponential backoff, honoring Retry-After,
+                within an overall deadline
+            → other failure? next provider
+  → all failed: extractive answer marked degraded (still cited, never a 500)
+  → usage: prompt/completion tokens, cost from configured prices, logged per request
+```
+
+| Concern | Behavior |
+| --- | --- |
+| Retries | up to 3 attempts; only transient errors; delay from `Retry-After` or `uniform(0, min(8s, 0.5s·2^n))` |
+| Circuit breaker | opens after 5 consecutive failures; one trial request after 30 s; success closes it |
+| Deadline | no retry is started that would end after `RAG_GENERATION_DEADLINE_SECONDS` |
+| Budgets | `RAG_MAX_CONTEXT_TOKENS`, `RAG_MAX_HISTORY_TOKENS`, `RAG_MAX_OUTPUT_TOKENS` (sent as `max_tokens`) |
+| Accounting | response `generation: {model, degraded, prompt_tokens, completion_tokens, cost_usd}`; `rag.usage` log event |
+
+Packing keeps sources in rank order and never renumbers them, so `[n]` citations still map to the right evidence when lower-ranked sources are cut. Query rewriting uses the first provider whose circuit is closed and falls back to the heuristic rewrite. Token counts come from the provider's `usage` field when present, otherwise a four-characters-per-token estimate.
+
+**Android-developer translation:** this is an OkHttp interceptor chain for model calls: a retry interceptor with backoff, a circuit breaker in front of a flaky backend, and a cached/offline response when the network is down, so the screen shows something useful instead of an error state.
+
+## Phase 17: document lifecycle
+
+Three gaps made the corpus hard to keep correct. Uploading a corrected `handbook.md` added a second copy beside the old one, so both versions competed as evidence. Only UTF-8 text could be uploaded. And background jobs lived in a Python list, so a restart lost them and a second replica could not share the work.
+
+**Versions.** A document's identity is still its content hash, and its *source* is its filename. Uploading new content for an existing source makes it the next version and marks the previous ones `superseded`:
+
+```text
+upload hours.txt (v1) → upload hours.txt with new bytes → v2 ready, v1 superseded
+search / answers      → only 'ready' documents
+GET /v1/documents?include_superseded=true → full history
+re-upload v1's exact bytes → v1 reinstated as version 3 (nothing re-embedded)
+```
+
+A transaction-scoped advisory lock serializes uploads of the same source, so two concurrent uploads cannot both become current. A user can only supersede versions they can read, so an upload cannot hide a document restricted to a group the uploader is not in.
+
+**Formats.** [`parsers.py`](parsers.py) accepts plain text, Markdown, HTML, and PDF. Send text as `content`, or a file as `content_base64` (optionally with `content_type`):
+
+- The type is **sniffed from the bytes**. A declared type or extension that disagrees is rejected, and archives, executables, and images are refused by signature.
+- HTML and PDF are parsed in a **separate Python process** (`python -I`, empty environment) with CPU-time, memory (Linux), and wall-clock limits. A malformed or hostile file kills only that child process; the API returns `422`.
+- PDF text is extracted per page, and chunks never cross a page boundary. Citations now include `page`. Extraction stops at 500 pages or 5 million characters, and encrypted PDFs are refused.
+
+**Durable jobs.** With a database, `POST /v1/ingestion/jobs` writes to the `ingestion_jobs` table ([`migrations/004_document_lifecycle.sql`](migrations/004_document_lifecycle.sql)):
+
+```text
+submit (tenant RLS) → claim_ingestion_job(): FOR UPDATE SKIP LOCKED, oldest runnable first
+  → handler under the job's tenant → completed | failed (input error)
+                                   → queued again with 2^attempt s backoff (other error, < 3 attempts)
+running for > 10 min (crashed worker) → claimable again
+completed or failed → uploaded bytes removed from the row
+```
+
+The claim function is `SECURITY DEFINER`: the worker can pick the next job across tenants, but every read and write of a job's contents still happens under that tenant's row-level security. Any number of replicas can poll safely; set `RAG_RUN_WORKER=0` for API-only replicas. Without a database, the in-process worker (Phase 12) remains.
+
+The in-memory mode now uses [`memory_store.py`](memory_store.py), which follows the same versioning, ACL, and deduplication rules as PostgreSQL, so the demo and the deployment behave alike.
+
+Not done here: malware scanning (a ClamAV step before parsing would fit in the job handler), OCR for scanned PDFs, and storing original files in object storage instead of the job row.
+
+**Android-developer translation:** the job table is WorkManager backed by a database instead of memory: work survives process death, unique work prevents two workers running the same job, and failed work retries with backoff.
+
+## Phase 18: operations
+
+The API could answer questions but was hard to run: errors were silent (`log_message` discarded every line), nothing measured latency or tokens, one client could exhaust the model budget, every query opened a new database connection, chat history vanished on restart or when a request reached another replica, and `docker stop` killed requests mid-flight.
+
+```text
+request → request ID (from x-request-id or generated)
+        → route → authenticate → rate limit (tenant/user token bucket) → handler
+        → one JSON log line: request_id, route, status, duration_ms, tenant, user
+        → metrics: requests by route/status, latency histogram, tokens, degraded answers
+```
+
+| Concern | Implementation |
+| --- | --- |
+| Logs | [`observability.py`](observability.py) writes JSON lines to stdout. Every request logs exactly once, including failures. `rag.audit` records document create/delete and failed authentication; `rag.usage` records tokens and cost. Unhandled errors log the traceback with the request ID and return `500` with that ID so a user report can be traced. |
+| Metrics | `GET /metrics` in Prometheus text format: `rag_http_requests_total{route,method,status}`, `rag_http_request_duration_seconds` histogram, `rag_generation_tokens_total{model}`, `rag_generation_degraded_total`, `rag_rate_limited_total`. Routes are labelled by handler name, never raw paths. Protect it with `RAG_METRICS_TOKEN`. |
+| Rate limits | token bucket per tenant/user (`RAG_RATE_LIMIT_PER_MINUTE`, default 120) → `429` with `Retry-After`. Health probes are exempt. |
+| Token budget | optional per-tenant daily cap on model tokens (`RAG_TENANT_DAILY_TOKEN_BUDGET`) → `429` until midnight UTC. |
+| Connections | `psycopg_pool` (`RAG_DB_POOL_MAX`, default 10). Tenant context is transaction-local, so a pooled connection never carries one tenant's setting into another request. |
+| Chat history | `chat_messages` table with forced RLS ([`migrations/005_chat_history.sql`](migrations/005_chat_history.sql)), bounded to the window the model uses. |
+| Shutdown | `SIGTERM` stops accepting connections, waits for in-flight requests, stops the worker, and closes the pool. |
+| Transport | 30 s socket timeout against stalled clients; `nosniff`, `no-store`, and `no-referrer` headers; CORS only for origins in `RAG_CORS_ORIGINS` (for the web UI). |
+
+Limits and metrics are per process. That is correct for one replica; with several, move the limiter and budget to Redis and let Prometheus aggregate the per-replica series.
+
+**Android-developer translation:** this is Crashlytics plus Firebase Performance for the backend: every request leaves a breadcrumb with an ID you can search for, dashboards come from counters rather than guesswork, and graceful shutdown is `onStop()` finishing its work instead of the process being killed mid-write.
 
 ## Phase plan
 
@@ -320,13 +599,18 @@ The repository will grow in this order:
 4. **Phase 4 — PostgreSQL persistence:** durable metadata, transactional chunks, idempotency, and pgvector readiness.
 5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
 6. **Phase 6 — local embeddings and pgvector retrieval:** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
-7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
-8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
-9. **Phase 9 — ingestion and evaluation (this phase):** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
-10. **Phase 10 — pluggable chat and platform adapters (this phase):** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
-11. **Phase 11 — retrieval hardening:** versioned migration tooling, persistent ACL metadata, deduplication, model-aware limits, and query transformation.
-12. **Phase 12 — generation and safety:** robust model gateway, citation entailment, PII controls, and policy enforcement.
-13. **Phase 13 — operations and deployment:** durable queues, tracing, cost and latency budgets, retries, rate limiting, backups, and production infrastructure.
+7. **Phase 7 — hybrid retrieval and deterministic reranking:** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
+8. **Phase 8 — tenant security and document lifecycle:** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
+9. **Phase 9 — ingestion and evaluation:** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
+10. **Phase 10 — pluggable chat and platform adapters:** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
+11. **Phase 11 — runnable and verified:** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
+12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
+13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
+14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
+15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
+16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
+17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
+18. **Phase 18 — operations (this phase):** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

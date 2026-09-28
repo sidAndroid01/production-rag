@@ -1,44 +1,41 @@
 # Architecture
 
-For the full explanation, read the [end-to-end guide](guide/README.md),
-[system mind map](guide/01-mind-map.md), and [code atlas](guide/02-architecture-and-code.md).
-The [gap assessment](guide/05-quality-and-gaps.md) qualifies the production-oriented
-foundations described below: the API currently uses one shared tenant, storage is
-volatile, and chunking has a known progress defect.
+The phase-by-phase explanation lives in the top-level [README](../README.md).
+This page is the one-screen map. (`legacy/docs/guide/` describes the archived
+FastAPI scaffold, not this application.)
 
 ```text
-Client -> FastAPI -> authentication/input policy -> RagService
-                                                   |-> chunking -> ChunkRepository
-                                                   |-> retrieval -> relevance gate
-                                                   `-> Generator -> cited response
+client ──x-api-key──▶ api.py  (route table, request ID, JSON logs, metrics, rate limit)
+                        │ auth.py: key digest → Principal(tenant, user, groups)
+          ┌─────────────┼────────────────────────────┐
+          ▼             ▼                            ▼
+  upload / job     query / chat                 documents CRUD
+  parsers.py       query.py validate            persistence.py / memory_store.py
+  (sniff, sandbox) providers.rewrite_query       (versions, ACL, RLS)
+  rag.py chunks    retrieve:
+  embeddings.py      pgvector + full-text (SQL ACL, ready versions only)
+  persist            → reranker.py (scores in [0,1]) → evidence gates
+  workers.py       gateway.py: budgets, retries, breaker, fallback, usage
+  (Postgres queue) providers.py: sources as data, cited-only citations
+                        │
+                        ▼
+              PostgreSQL + pgvector (forced RLS per tenant)
+              documents · chunks · ingestion_jobs · chat_messages
 ```
-
-The domain uses ports so infrastructure is replaceable. The repository starts with a deterministic
-in-memory lexical retriever and extractive generator: this keeps tests free of network calls and makes
-failure behavior inspectable. Production milestones add a persistent vector adapter and hosted LLM
-without coupling those SDKs to the API or domain.
 
 ## Trust boundaries
 
-- API clients are untrusted: authenticate, cap request size, validate type and length.
-- uploaded documents are untrusted data, never instructions; role-like labels are neutralized.
-- retrieved context is admitted only above a relevance threshold.
-- with the default positive threshold, answers without matching evidence abstain;
-  admitted hits produce citations, but claim-level grounding is not verified.
-- settings load from the environment or local `.env`; `.env` is Git-ignored.
-  No secret-manager integration is implemented; the sample key is for development.
-- chunks carry tenant identity and search filters by tenant, but current authentication
-  maps every accepted API request to the same `default` tenant.
+| Boundary | Control |
+| --- | --- |
+| Client → API | API key hashed and mapped server-side; body identity ignored or must match; body size, JSON shape, and query length limits; per-user rate limit |
+| API → database | restricted `rag_app` role (no DDL, no RLS bypass); tenant set per transaction; ACL applied in SQL before `LIMIT` |
+| Upload → parser | type sniffed from bytes; PDF/HTML parsed in a resource-limited child process |
+| Documents → model | sources sent as delimited data in the user turn, never the system prompt; only cited sources are returned; uncited answers abstain |
+| API → model provider | timeouts, retries, circuit breaker, deadline, token budgets; extractive fallback instead of a 500 |
 
-## Production target
+## Where to look next
 
-```text
-Load balancer -> stateless API -> Postgres/pgvector
-                         |-----> object storage
-                         |-----> Redis (rate limit/cache/jobs)
-                         `-----> model gateway
-Telemetry: OpenTelemetry -> traces/metrics/logs; evals gate releases in CI.
-```
-
-See `ROADMAP.md` for incremental, interview-friendly milestones.
-
+- Schema: [`migrations/`](../migrations/) (applied by [`migrate.py`](../migrate.py))
+- Quality numbers and thresholds: [`evals/`](../evals/) and README Phase 15
+- Deployment: [`compose.yaml`](../compose.yaml), [`Dockerfile`](../Dockerfile), [`.env.example`](../.env.example)
+- Remaining work: [`ROADMAP.md`](../ROADMAP.md)

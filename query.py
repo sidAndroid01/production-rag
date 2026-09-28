@@ -17,11 +17,16 @@ from uuid import uuid4
 
 
 class ChunkLike(Protocol):
-    text: str
-    document_id: str
-    index: int
-    tenant_id: str
-    source: str
+    @property
+    def text(self) -> str: ...
+    @property
+    def document_id(self) -> str: ...
+    @property
+    def index(self) -> int: ...
+    @property
+    def tenant_id(self) -> str: ...
+    @property
+    def source(self) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +58,19 @@ INJECTION_PATTERNS = (
 )
 
 
+# Function words match almost every chunk; counting them lets unrelated
+# questions clear the evidence gate on "the", "is" and "do" alone.
+STOPWORD_TEXT = (
+    "a an and are as at be been but by can could did do does for from had has have "
+    "how i if in into is it its me my of on or our so than that the their them then "
+    "there these they this to was we were what when where which who why will with "
+    "would you your "
+)
+STOPWORDS = frozenset(STOPWORD_TEXT.split())
+
+
 def _terms(text: str) -> Counter[str]:
-    return Counter(TOKEN_RE.findall(text.lower()))
+    return Counter(term for term in TOKEN_RE.findall(text.lower()) if term not in STOPWORDS)
 
 
 def _cosine(left: Counter[str], right: Counter[str]) -> float:
@@ -74,17 +90,21 @@ class RagQueryPipeline:
         *,
         top_k: int = 5,
         min_score: float = 0.10,
+        relative_score: float = 0.0,
         max_query_length: int = 2_000,
     ) -> None:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
         if not 0.0 <= min_score <= 1.0:
             raise ValueError("min_score must be between 0 and 1")
+        if not 0.0 <= relative_score <= 1.0:
+            raise ValueError("relative_score must be between 0 and 1")
         if max_query_length <= 0:
             raise ValueError("max_query_length must be positive")
         self.chunks = tuple(chunks)
         self.top_k = top_k
         self.min_score = min_score
+        self.relative_score = relative_score
         self.max_query_length = max_query_length
 
     def _validate(self, question: str) -> str:
@@ -110,15 +130,36 @@ class RagQueryPipeline:
         )
         return sorted(candidates, key=lambda item: (-item[1], item[0].index))[: self.top_k]
 
+    def evidence(
+        self,
+        question: str,
+        tenant_id: str,
+        ranked_chunks: Sequence[tuple[ChunkLike, float]] | None = None,
+    ) -> list[tuple[ChunkLike, float]]:
+        """Validate, then return the top-k tenant chunks that pass the evidence gate.
+
+        With ``ranked_chunks`` (from a database search) those candidates are
+        gated; otherwise the in-memory lexical retriever supplies them.
+        """
+        safe_question = self.validate_query(question, tenant_id)
+        candidates = (
+            ranked_chunks if ranked_chunks is not None else self._retrieve(safe_question, tenant_id)
+        )
+        admitted = [
+            (chunk, score)
+            for chunk, score in candidates[: self.top_k]
+            if chunk.tenant_id == tenant_id and score >= self.min_score
+        ]
+        if not admitted:
+            return []
+        # Relative gate: drop runners-up far below the best hit; they are
+        # usually off-topic and dilute both the prompt and the citations.
+        floor = max(score for _, score in admitted) * self.relative_score
+        return [(chunk, score) for chunk, score in admitted if score >= floor]
+
     def query(self, question: str, tenant_id: str, request_id: str | None = None) -> QueryResult:
         """Return a grounded response, or an explicit abstention when evidence is weak."""
-        safe_question = self.validate_query(question, tenant_id)
-        grounded = [
-            (chunk, score)
-            for chunk, score in self._retrieve(safe_question, tenant_id)
-            if score >= self.min_score
-        ]
-        return self._build_result(grounded, request_id)
+        return self._build_result(self.evidence(question, tenant_id), request_id)
 
     def query_ranked(
         self,
@@ -128,13 +169,7 @@ class RagQueryPipeline:
         request_id: str | None = None,
     ) -> QueryResult:
         """Format already-ranked vector results using the same safety/grounding rules."""
-        self.validate_query(question, tenant_id)
-        grounded = [
-            (chunk, score)
-            for chunk, score in ranked_chunks[: self.top_k]
-            if chunk.tenant_id == tenant_id and score >= self.min_score
-        ]
-        return self._build_result(grounded, request_id)
+        return self._build_result(self.evidence(question, tenant_id, ranked_chunks), request_id)
 
     @staticmethod
     def _build_result(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -24,6 +25,7 @@ class Chunk:
     source: str
     id: str
     created_at: datetime
+    page: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,15 +101,33 @@ class RagIngestionPipeline:
         return chunks
 
     def ingest(self, data: bytes, filename: str, tenant_id: str) -> IngestResult:
-        """Return content-addressed chunks without performing downstream RAG work."""
+        """Return content-addressed chunks for one UTF-8 text document."""
+        text = data.decode("utf-8", errors="strict")
+        return self.ingest_segments(data, [(None, text)], filename, tenant_id)
+
+    def ingest_segments(
+        self,
+        original: bytes,
+        segments: Sequence[tuple[int | None, str]],
+        filename: str,
+        tenant_id: str,
+    ) -> IngestResult:
+        """Chunk already-extracted text, keeping each chunk within one page.
+
+        ``original`` is the uploaded file; its hash is the document identity.
+        ``segments`` are ``(page, text)`` pairs from a parser (page is None for
+        formats without pages).
+        """
         filename = self._normalize_identifier(filename, "filename")
         tenant_id = self._normalize_identifier(tenant_id, "tenant_id")
-
-        text = data.decode("utf-8", errors="strict")
-        safe_text = self._sanitize_document(text)
-        digest = hashlib.sha256(data).hexdigest()
+        digest = hashlib.sha256(original).hexdigest()
         document_id = digest[:24]
         created_at = datetime.now(UTC)
+        pieces = [
+            (page, piece)
+            for page, text in segments
+            for piece in self._split(self._sanitize_document(text))
+        ]
         chunks = tuple(
             Chunk(
                 text=piece,
@@ -117,8 +137,9 @@ class RagIngestionPipeline:
                 source=filename,
                 id=str(uuid4()),
                 created_at=created_at,
+                page=page,
             )
-            for index, piece in enumerate(self._split(safe_text))
+            for index, (page, piece) in enumerate(pieces)
         )
         return IngestResult(document_id, digest, chunks)
 

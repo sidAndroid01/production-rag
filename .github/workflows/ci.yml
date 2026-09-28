@@ -1,0 +1,50 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: rag_owner
+          POSTGRES_PASSWORD: ci-owner-password
+          POSTGRES_DB: rag
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rag_owner -d rag"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      RAG_OWNER_DATABASE_URL: postgresql://rag_owner:ci-owner-password@localhost:5432/rag
+      RAG_APP_DB_PASSWORD: ci-app-password
+      RAG_RLS_TEST_DSN: postgresql://rag_app:ci-app-password@localhost:5432/rag
+      RAG_EVAL_DSN: postgresql://rag_app:ci-app-password@localhost:5432/rag
+      FASTEMBED_CACHE_PATH: ~/.cache/fastembed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-bge-small-en-v1.5
+      - run: uv sync --extra dev --extra embeddings --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run python migrate.py
+      - run: uv run pytest --cov --cov-fail-under=80
+      # Quality gate: fail the build if retrieval or answer metrics regress.
+      - run: uv run python -m evals.evaluate --backend memory --check
+      - run: uv run python -m evals.evaluate --backend postgres --check
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t production-rag:ci .

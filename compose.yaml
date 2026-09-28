@@ -1,0 +1,71 @@
+# Full local stack: Postgres + pgvector, a one-shot migration job, and the API.
+#   cp .env.example .env   # then set the passwords and API key
+#   docker compose up --build
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rag_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: rag
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - rag_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_owner -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["python", "migrate.py"]
+    environment:
+      RAG_OWNER_DATABASE_URL: postgresql://rag_owner:${POSTGRES_PASSWORD}@postgres:5432/rag
+      RAG_APP_DB_PASSWORD: ${RAG_APP_DB_PASSWORD:?Set RAG_APP_DB_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql://rag_app:${RAG_APP_DB_PASSWORD}@postgres:5432/rag
+      APP_ENV: production
+      # Single-key mode: RAG_API_KEY is bound to RAG_TENANT_ID.
+      RAG_TENANT_ID: ${RAG_TENANT_ID:-default}
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      # Multi-tenant mode: a JSON key file (see auth.py); uncomment the volume.
+      RAG_API_KEYS_FILE: ${RAG_API_KEYS_FILE:-}
+      RAG_MODEL_BASE_URL: ${RAG_MODEL_BASE_URL:-}
+      RAG_MODEL_API_KEY: ${RAG_MODEL_API_KEY:-}
+      RAG_MODEL_NAME: ${RAG_MODEL_NAME:-}
+      RAG_FALLBACK_MODEL_BASE_URL: ${RAG_FALLBACK_MODEL_BASE_URL:-}
+      RAG_FALLBACK_MODEL_API_KEY: ${RAG_FALLBACK_MODEL_API_KEY:-}
+      RAG_FALLBACK_MODEL_NAME: ${RAG_FALLBACK_MODEL_NAME:-}
+      RAG_MODEL_INPUT_PRICE_PER_MTOK: ${RAG_MODEL_INPUT_PRICE_PER_MTOK:-0}
+      RAG_MODEL_OUTPUT_PRICE_PER_MTOK: ${RAG_MODEL_OUTPUT_PRICE_PER_MTOK:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RAG_RATE_LIMIT_PER_MINUTE: ${RAG_RATE_LIMIT_PER_MINUTE:-120}
+      RAG_TENANT_DAILY_TOKEN_BUDGET: ${RAG_TENANT_DAILY_TOKEN_BUDGET:-0}
+      RAG_CORS_ORIGINS: ${RAG_CORS_ORIGINS:-}
+      RAG_METRICS_TOKEN: ${RAG_METRICS_TOKEN:-}
+    # volumes:
+    #   - ./secrets/api-keys.json:/run/secrets/api-keys.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # SIGTERM lets in-flight requests finish before the container stops.
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+volumes:
+  rag_pgdata:
