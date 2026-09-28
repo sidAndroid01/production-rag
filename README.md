@@ -472,6 +472,37 @@ CI runs both backends with `--check` against [`evals/thresholds.json`](evals/thr
 
 **Android-developer translation:** this is a macrobenchmark plus screenshot tests for answers. Unit tests prove a function returns; the evaluation proves the user-visible result stayed good, and CI blocks the merge when it does not.
 
+## Phase 16: model gateway
+
+A hosted model is a remote dependency that times out, rate-limits, and has outages. Until now one failed call surfaced as `500 internal server error`, nothing bounded how much context or history was sent, and nothing recorded tokens or cost.
+
+[`gateway.py`](gateway.py) sits between the API and the providers:
+
+```text
+evidence + history
+  → budget: pack sources in rank order into RAG_MAX_CONTEXT_TOKENS; keep recent history
+  → for each provider (primary, then RAG_FALLBACK_MODEL_*):
+       circuit open? skip it
+       call → transient failure (timeout, connection, 429, 5xx)?
+                retry with full-jitter exponential backoff, honoring Retry-After,
+                within an overall deadline
+            → other failure? next provider
+  → all failed: extractive answer marked degraded (still cited, never a 500)
+  → usage: prompt/completion tokens, cost from configured prices, logged per request
+```
+
+| Concern | Behavior |
+| --- | --- |
+| Retries | up to 3 attempts; only transient errors; delay from `Retry-After` or `uniform(0, min(8s, 0.5s·2^n))` |
+| Circuit breaker | opens after 5 consecutive failures; one trial request after 30 s; success closes it |
+| Deadline | no retry is started that would end after `RAG_GENERATION_DEADLINE_SECONDS` |
+| Budgets | `RAG_MAX_CONTEXT_TOKENS`, `RAG_MAX_HISTORY_TOKENS`, `RAG_MAX_OUTPUT_TOKENS` (sent as `max_tokens`) |
+| Accounting | response `generation: {model, degraded, prompt_tokens, completion_tokens, cost_usd}`; `rag.usage` log event |
+
+Packing keeps sources in rank order and never renumbers them, so `[n]` citations still map to the right evidence when lower-ranked sources are cut. Query rewriting uses the first provider whose circuit is closed and falls back to the heuristic rewrite. Token counts come from the provider's `usage` field when present, otherwise a four-characters-per-token estimate.
+
+**Android-developer translation:** this is an OkHttp interceptor chain for model calls: a retry interceptor with backoff, a circuit breaker in front of a flaky backend, and a cached/offline response when the network is down, so the screen shows something useful instead of an error state.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -490,8 +521,8 @@ The repository will grow in this order:
 12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
 13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
 14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
-15. **Phase 15 — evaluation that counts (this phase):** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
-16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
+15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
+16. **Phase 16 — model gateway (this phase):** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
 17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
 18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 

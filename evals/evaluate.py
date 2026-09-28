@@ -27,8 +27,9 @@ from uuid import uuid4
 
 from api import RagApiApplication
 from auth import ApiKeyStore
+from gateway import configured_provider
 from permissions import Principal
-from providers import ExtractiveProvider, ModelProvider, configured_provider
+from providers import ExtractiveProvider, ModelProvider
 
 DATASETS = Path(__file__).with_name("datasets")
 DEFAULT_DATASET = DATASETS / "golden-v2.json"

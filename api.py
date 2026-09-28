@@ -8,6 +8,7 @@ Request bodies are JSON; uploaded document content is a UTF-8 string.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -23,15 +24,16 @@ from uuid import uuid4
 
 from auth import ApiKeyStore
 from embeddings import Embedder, LocalFastEmbedder
+from gateway import configured_provider
 from history import ChatHistoryStore
 from permissions import Principal, can_read, can_read_groups, normalize_groups
 from persistence import PostgresPersistence
 from providers import (
     ABSTENTION,
     ChatTurn,
+    Generation,
     ModelProvider,
     cited_sources,
-    configured_provider,
     strip_invalid_citations,
 )
 from query import RagQueryPipeline, UnsafeQueryError
@@ -63,6 +65,7 @@ class Request:
 
 
 Handler = Callable[[Request], tuple[int, dict[str, Any]]]
+usage_logger = logging.getLogger("rag.usage")
 
 # Calibrated on evals/datasets/golden-v2.json (see README, Phase 15).
 LEXICAL_MIN_SCORE = 0.15
@@ -440,9 +443,12 @@ class RagApiApplication:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
 
         answer, used = ABSTENTION, []
+        generation: Generation | None = None
         if evidence:
-            raw = self.provider.generate(question, [chunk.text for chunk, _ in evidence], prior)
-            candidate = strip_invalid_citations(raw, len(evidence))
+            generation = self.provider.complete(
+                question, [chunk.text for chunk, _ in evidence], prior
+            )
+            candidate = strip_invalid_citations(generation.text, len(evidence))
             used = cited_sources(candidate, len(evidence))
             # An answer that cites nothing is not grounded; return the abstention.
             if used:
@@ -465,6 +471,26 @@ class RagApiApplication:
             "grounded": bool(used),
             "citations": citations,
         }
+        if generation is not None:
+            usage_logger.info(
+                "generation",
+                extra={
+                    "request_id": request.request_id,
+                    "tenant_id": tenant_id,
+                    "model": generation.model,
+                    "prompt_tokens": generation.prompt_tokens,
+                    "completion_tokens": generation.completion_tokens,
+                    "cost_usd": generation.cost_usd,
+                    "degraded": generation.degraded,
+                },
+            )
+            response["generation"] = {
+                "model": generation.model,
+                "degraded": generation.degraded,
+                "prompt_tokens": generation.prompt_tokens,
+                "completion_tokens": generation.completion_tokens,
+                "cost_usd": generation.cost_usd,
+            }
         if is_chat:
             assert isinstance(session_id, str)
             self.history.append(

@@ -8,10 +8,10 @@ reported as ungrounded.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 from urllib import request
 
 ABSTENTION = "I do not have enough evidence in the indexed documents to answer that."
@@ -37,6 +37,23 @@ CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 class ChatTurn:
     role: str
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class Generation:
+    """One answer plus what it cost; ``degraded`` marks a fallback answer."""
+
+    text: str
+    model: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    degraded: bool = False
+    cost_usd: float = 0.0
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count (about four characters per token for English)."""
+    return max(1, (len(text) + 3) // 4)
 
 
 def format_sources(context: Sequence[str]) -> str:
@@ -76,8 +93,16 @@ def heuristic_rewrite(question: str, history: Sequence[ChatTurn]) -> str:
 
 
 class ModelProvider:
+    name = "provider"
+
     def generate(self, question: str, context: Sequence[str], history: Sequence[ChatTurn]) -> str:
         raise NotImplementedError
+
+    def complete(
+        self, question: str, context: Sequence[str], history: Sequence[ChatTurn]
+    ) -> Generation:
+        """Generate with metadata; providers that report usage override this."""
+        return Generation(self.generate(question, context, history), self.name)
 
     def rewrite_query(self, question: str, history: Sequence[ChatTurn]) -> str:
         return heuristic_rewrite(question, history)
@@ -85,6 +110,8 @@ class ModelProvider:
 
 class ExtractiveProvider(ModelProvider):
     """Free fallback that makes the local demo work without a model API."""
+
+    name = "extractive"
 
     def generate(self, question: str, context: Sequence[str], history: Sequence[ChatTurn]) -> str:
         del question, history
@@ -97,11 +124,20 @@ class ExtractiveProvider(ModelProvider):
 class OpenAICompatibleProvider(ModelProvider):
     """Works with OpenAI, Ollama, vLLM, LM Studio, and compatible gateways."""
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 30.0,
+        max_output_tokens: int = 512,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.name = model
         self.timeout = timeout
+        self.max_output_tokens = max_output_tokens
 
     def build_messages(
         self, question: str, context: Sequence[str], history: Sequence[ChatTurn]
@@ -115,8 +151,15 @@ class OpenAICompatibleProvider(ModelProvider):
         )
         return messages
 
-    def _complete(self, messages: list[dict[str, str]]) -> str:
-        payload = json.dumps({"model": self.model, "messages": messages, "temperature": 0}).encode()
+    def _request(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": self.max_output_tokens,
+            }
+        ).encode()
         req = request.Request(
             f"{self.base_url}/chat/completions",
             data=payload,
@@ -127,11 +170,31 @@ class OpenAICompatibleProvider(ModelProvider):
             method="POST",
         )
         with request.urlopen(req, timeout=self.timeout) as response:
-            body = json.loads(response.read())
-        return str(body["choices"][0]["message"]["content"])
+            body: dict[str, Any] = json.loads(response.read())
+        return body
+
+    def _complete(self, messages: list[dict[str, str]]) -> str:
+        return str(self._request(messages)["choices"][0]["message"]["content"])
 
     def generate(self, question: str, context: Sequence[str], history: Sequence[ChatTurn]) -> str:
-        return self._complete(self.build_messages(question, context, history))
+        return self.complete(question, context, history).text
+
+    def complete(
+        self, question: str, context: Sequence[str], history: Sequence[ChatTurn]
+    ) -> Generation:
+        messages = self.build_messages(question, context, history)
+        body = self._request(messages)
+        text = str(body["choices"][0]["message"]["content"])
+        usage = body.get("usage") or {}
+        return Generation(
+            text=text,
+            model=str(body.get("model") or self.model),
+            prompt_tokens=int(
+                usage.get("prompt_tokens")
+                or sum(estimate_tokens(message["content"]) for message in messages)
+            ),
+            completion_tokens=int(usage.get("completion_tokens") or estimate_tokens(text)),
+        )
 
     def rewrite_query(self, question: str, history: Sequence[ChatTurn]) -> str:
         if not history:
@@ -150,12 +213,3 @@ class OpenAICompatibleProvider(ModelProvider):
         except Exception:
             return heuristic_rewrite(question, history)
         return rewritten or question
-
-
-def configured_provider() -> ModelProvider:
-    base_url = os.getenv("RAG_MODEL_BASE_URL")
-    api_key = os.getenv("RAG_MODEL_API_KEY") or os.getenv("OPENAI_API_KEY")
-    model = os.getenv("RAG_MODEL_NAME")
-    if base_url and api_key and model:
-        return OpenAICompatibleProvider(base_url, api_key, model)
-    return ExtractiveProvider()
