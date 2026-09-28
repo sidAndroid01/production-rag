@@ -64,6 +64,11 @@ class Request:
 
 Handler = Callable[[Request], tuple[int, dict[str, Any]]]
 
+# Calibrated on evals/datasets/golden-v2.json (see README, Phase 15).
+LEXICAL_MIN_SCORE = 0.15
+HYBRID_MIN_SCORE = 0.40
+RELATIVE_SCORE = 0.8
+
 
 def _iso(value: Any) -> Any:
     return value.isoformat() if isinstance(value, datetime) else value
@@ -82,6 +87,8 @@ class RagApiApplication:
         provider: ModelProvider | None = None,
         reranker: CrossEncoderReranker | None = None,
         keys: ApiKeyStore | None = None,
+        min_score: float | None = None,
+        relative_score: float | None = None,
     ) -> None:
         # Identity is server-side: each key maps to one tenant, user and groups.
         # api_key/tenant_id are a shorthand for a single-key deployment.
@@ -92,6 +99,16 @@ class RagApiApplication:
                 else ApiKeyStore.from_environment()
             )
         self.keys = keys
+        # Evidence gate. Lexical and hybrid scores live on different scales, so
+        # each storage mode has its own default, calibrated by evals/evaluate.py.
+        if min_score is None:
+            configured = os.getenv("RAG_MIN_SCORE")
+            default = HYBRID_MIN_SCORE if persistence is not None else LEXICAL_MIN_SCORE
+            min_score = float(configured) if configured else default
+        self.min_score = min_score
+        if relative_score is None:
+            relative_score = float(os.getenv("RAG_RELATIVE_SCORE", RELATIVE_SCORE))
+        self.relative_score = relative_score
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
@@ -351,16 +368,26 @@ class RagApiApplication:
     def _chat(self, request: Request) -> tuple[int, dict[str, Any]]:
         return self._answer(request, is_chat=True)
 
-    def _retrieve(self, principal: Principal, question: str) -> list[tuple[Any, float]]:
-        """Return gated evidence the principal may read, best first."""
+    def retrieve(
+        self, principal: Principal, question: str, *, gated: bool = True
+    ) -> list[tuple[Any, float]]:
+        """Return evidence the principal may read, best first.
+
+        ``gated=False`` skips both evidence gates; evaluation uses it to see the
+        full ranking and calibrate the thresholds.
+        """
         tenant_id = principal.tenant_id
+        gate = self.min_score if gated else 0.0
+        relative = self.relative_score if gated else 0.0
         if self.persistence is None:
             readable = {row["document_id"] for row in self._visible_documents(principal)}
             with self._lock:
                 chunks = tuple(c for c in self._chunks if c.document_id in readable)
-            return RagQueryPipeline(chunks).evidence(question, tenant_id)
+            return RagQueryPipeline(chunks, min_score=gate, relative_score=relative).evidence(
+                question, tenant_id
+            )
         assert self.embedder is not None
-        query = RagQueryPipeline(())
+        query = RagQueryPipeline((), min_score=gate, relative_score=relative)
         # Validate before any embedding or database work is spent on the query.
         safe_question = query.validate_query(question, tenant_id)
         rows = self.persistence.search_hybrid(
@@ -408,7 +435,7 @@ class RagApiApplication:
             # Follow-ups such as "and for contractors?" are rewritten into a
             # standalone query for retrieval; the model still sees the original.
             search_query = self.provider.rewrite_query(question, prior) if prior else question
-            evidence = self._retrieve(principal, search_query)
+            evidence = self.retrieve(principal, search_query)
         except UnsafeQueryError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
 

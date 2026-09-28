@@ -301,7 +301,7 @@ PostgreSQL now enables and forces row-level security on both `documents` and `ch
 
 ## Phase 9: token-aware ingestion and retrieval evaluation
 
-The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) runs the versioned [`golden-v1.json`](evals/datasets/golden-v1.json) set and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
+The chunker now targets token-like whitespace units instead of character counts, prefers sentence boundaries, preserves heading and paragraph text, and still guarantees progress for oversized tokens. The offline evaluator in [`evals/evaluate.py`](evals/evaluate.py) ran the first versioned golden set (replaced by `golden-v2.json` in Phase 15) and reports Recall@1/3/5, MRR, and nDCG@5. These metrics provide a regression gate for chunking and retrieval changes before we tune embeddings or reranker weights.
 
 ## Phase 10: pluggable chat, workers, permissions, and learned reranking
 
@@ -429,6 +429,49 @@ This is citation *alignment*, not entailment: the response now cites exactly wha
 
 **Android-developer translation:** the system prompt is like your app's manifest permissions and the sources are like content from a `ContentProvider` you do not own: you render it, but it never gets to declare permissions.
 
+## Phase 15: evaluation that counts
+
+Phase 9's golden set had four pre-chunked snippets and scored only the in-memory lexical retriever; it could not see the pgvector path, the evidence gate, generation, or citations. [`golden-v2.json`](evals/datasets/golden-v2.json) is a 15-document policy corpus with 50 questions: 34 literal, 6 paraphrased with little shared vocabulary ("Can I work from home?" against "Remote work is allowed…"), and 10 unanswerable questions that must abstain.
+
+[`evals/evaluate.py`](evals/evaluate.py) now drives the real `RagApiApplication`: documents go through `POST /v1/documents` and questions through `POST /v1/query`, so ingestion, identity, ACLs, hybrid retrieval, both evidence gates, generation, and citation alignment are measured together.
+
+| Group | Metrics |
+| --- | --- |
+| Retrieval (answerable) | Recall@1/3/5, MRR, nDCG@5, paraphrase Recall@5 |
+| Answers | answer rate, abstention accuracy on unanswerable, citation precision, expected-term recall |
+| Calibration | the configured gate and the threshold that best separates answerable from unanswerable top scores |
+| Operations | `/v1/query` latency p50/p95 |
+
+```bash
+make eval                                                   # memory backend, with --check
+RAG_EVAL_DSN=postgresql://rag_app:...@localhost:5432/rag \
+  uv run python -m evals.evaluate --backend postgres --check
+uv run python -m evals.evaluate --provider configured       # your RAG_MODEL_* model (costs tokens)
+```
+
+The first run exposed real defects, which this phase fixes:
+
+| Finding | Fix | Hybrid before → after |
+| --- | --- | --- |
+| The 0.10 gate was designed for lexical scores; every hybrid score is above 0.3, so the API **never** abstained | per-backend default gates, calibrated from the score distributions: `0.40` hybrid, `0.15` lexical (`RAG_MIN_SCORE` overrides) | abstention 0.0 → 0.9 |
+| Two of every three citations were off-topic runners-up | a relative gate keeps only chunks within 80% of the best hit (`RAG_RELATIVE_SCORE`) | citation precision 0.34 → 0.94 |
+| Lexical scoring counted "the", "is", "do", so unrelated questions cleared the gate | stopwords are ignored by the lexical scorer | lexical abstention 0.4 → 0.8, paraphrase recall 0.67 → 1.0 |
+
+Current results with the free extractive answerer:
+
+| Metric | Memory (lexical) | PostgreSQL (hybrid) |
+| --- | --- | --- |
+| Recall@1 | 0.825 | 1.0 |
+| Paraphrase Recall@5 | 1.0 | 1.0 |
+| Answer rate | 0.85 | 1.0 |
+| Abstention accuracy | 0.8 | 0.9 |
+| Citation precision | 0.91 | 0.94 |
+| Latency p95 | < 1 ms | ≈ 17 ms |
+
+CI runs both backends with `--check` against [`evals/thresholds.json`](evals/thresholds.json) and fails the build on regression. Two honest limits: the corpus is small enough that each document is one chunk, so these numbers say little about long-document chunking; and with an LLM provider, citation precision measures alignment, not entailment. Grow the dataset (and recalibrate) before trusting the gates on a different corpus.
+
+**Android-developer translation:** this is a macrobenchmark plus screenshot tests for answers. Unit tests prove a function returns; the evaluation proves the user-visible result stayed good, and CI blocks the merge when it does not.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -446,8 +489,8 @@ The repository will grow in this order:
 11. **Phase 11 — runnable and verified:** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
 12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
 13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
-14. **Phase 14 — grounded generation (this phase):** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
-15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
+14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
+15. **Phase 15 — evaluation that counts (this phase):** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
 16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
 17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
 18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.

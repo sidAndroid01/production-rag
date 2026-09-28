@@ -1,0 +1,118 @@
+{
+  "version": "golden-v2",
+  "description": "Northwind Outfitters policy corpus: answerable questions (literal and paraphrased) and unanswerable questions that must abstain.",
+  "documents": [
+    {
+      "source": "refund-policy.md",
+      "content": "# Refund policy\nCustomers may return unused items within 30 days of delivery for a full refund to the original payment method. Items marked final sale cannot be returned. Refunds are processed within 5 business days after the warehouse receives the item. Return shipping is free for members of the Trailhead loyalty program; other customers pay a flat 6 dollar return label fee."
+    },
+    {
+      "source": "shipping.md",
+      "content": "# Shipping\nStandard shipping takes 3 to 7 business days and is free on orders over 75 dollars. Express shipping arrives in 2 business days and costs 18 dollars. We ship to the United States, Canada, and Mexico only. Orders placed before 1 pm Pacific time on a business day leave the warehouse the same day."
+    },
+    {
+      "source": "warranty.md",
+      "content": "# Warranty\nAll tents and backpacks carry a lifetime warranty against manufacturing defects. Apparel is covered for 2 years. The warranty does not cover normal wear, accidents, or damage from improper care. To file a claim, upload photos of the defect and your order number through the warranty portal; claims are reviewed within 10 business days."
+    },
+    {
+      "source": "loyalty-program.md",
+      "content": "# Trailhead loyalty program\nMembership is free. Members earn 1 point per dollar spent and can redeem 100 points for a 5 dollar reward. Points expire 12 months after they are earned. Members who spend more than 1000 dollars in a calendar year reach Summit tier, which adds early access to sales and free express shipping."
+    },
+    {
+      "source": "price-match.md",
+      "content": "# Price match\nWe match the price of an identical item sold by an authorized retailer within 14 days of your purchase. The item must be in stock at the competitor. Price match does not apply to clearance, auction sites, or marketplace sellers. Contact customer care with a link to the lower price to request an adjustment."
+    },
+    {
+      "source": "gift-cards.md",
+      "content": "# Gift cards\nGift cards are available from 25 to 500 dollars and never expire. They cannot be exchanged for cash except where required by law. A lost gift card can be replaced only if you have the original receipt showing the card number. Gift cards cannot be used to buy other gift cards."
+    },
+    {
+      "source": "rentals.md",
+      "content": "# Gear rentals\nTents, sleeping bags, and stoves can be rented from our Denver and Portland stores. Rentals cost 20 percent of the retail price per week, with a 3 day minimum. A refundable deposit equal to half the retail price is held on your card. Late returns are charged the daily rate plus a 10 dollar fee per day."
+    },
+    {
+      "source": "repairs.md",
+      "content": "# Repair service\nOur repair shop fixes zippers, seams, tent poles, and inflatable pads. Repairs of items still under warranty are free. Other repairs are quoted after inspection and usually cost between 15 and 60 dollars. Most repairs are completed within 3 weeks, and we ship the repaired item back at no charge."
+    },
+    {
+      "source": "sustainability.md",
+      "content": "# Sustainability\nSince 2023 all of our down insulation is certified to the Responsible Down Standard. Our packaging is plastic free and made from 90 percent recycled cardboard. Through the Second Trail program we buy back used gear in good condition for store credit and resell it at a discount."
+    },
+    {
+      "source": "store-hours.md",
+      "content": "# Store hours\nRetail stores open from 10 am to 8 pm Monday through Saturday and from 11 am to 6 pm on Sunday. All stores are closed on Thanksgiving Day and Christmas Day. The Denver flagship store opens one hour earlier on weekends for members."
+    },
+    {
+      "source": "employee-handbook.md",
+      "content": "# Employee handbook\nFull time employees accrue 15 days of paid time off per year, increasing to 20 days after 5 years of service. Employees receive a 40 percent discount on full price merchandise. Remote work is allowed up to 2 days per week with manager approval. Performance reviews take place every March and September."
+    },
+    {
+      "source": "expense-policy.md",
+      "content": "# Travel and expense policy\nEmployees must book flights in economy class for trips under 6 hours. The daily meal allowance is 60 dollars in the United States. Receipts are required for any expense over 25 dollars. Expense reports must be submitted within 30 days of the trip through the finance system."
+    },
+    {
+      "source": "security-policy.md",
+      "content": "# Information security policy\nPasswords must be at least 14 characters and are never shared. Multi factor authentication is required for email and all finance systems. Lost or stolen laptops must be reported to the IT help desk within 24 hours. Customer data may only be stored in approved company systems."
+    },
+    {
+      "source": "product-care.md",
+      "content": "# Product care\nWash down jackets on a gentle cycle with a down specific detergent and tumble dry on low heat with clean tennis balls. Never dry clean waterproof shells; reapply a durable water repellent treatment once a season. Store tents loosely in a dry place rather than in their stuff sack."
+    },
+    {
+      "source": "membership-events.md",
+      "content": "# Community events\nWe host free guided hikes on the first Saturday of every month from each store. Beginner climbing clinics cost 35 dollars and include harness and shoe rental. Events can be booked in the app up to 30 days in advance, and cancellations less than 24 hours before the event forfeit the fee."
+    }
+  ],
+  "queries": [
+    {"id": "q01", "question": "How many days do I have to return an item?", "relevant_sources": ["refund-policy.md"], "expected_terms": ["30 days"]},
+    {"id": "q02", "question": "Can final sale items be returned?", "relevant_sources": ["refund-policy.md"], "expected_terms": ["final sale"]},
+    {"id": "q03", "question": "How long until my refund is processed?", "relevant_sources": ["refund-policy.md"], "expected_terms": ["5 business days"]},
+    {"id": "q04", "question": "How much is the return label fee?", "relevant_sources": ["refund-policy.md"], "expected_terms": ["6 dollar"]},
+    {"id": "q05", "question": "Is standard shipping free?", "relevant_sources": ["shipping.md"], "expected_terms": ["75 dollars"]},
+    {"id": "q06", "question": "How much does express shipping cost?", "relevant_sources": ["shipping.md"], "expected_terms": ["18 dollars"]},
+    {"id": "q07", "question": "Which countries do you ship to?", "relevant_sources": ["shipping.md"], "expected_terms": ["Canada"]},
+    {"id": "q08", "question": "What is the order cutoff time for same day dispatch?", "relevant_sources": ["shipping.md"], "expected_terms": ["1 pm"]},
+    {"id": "q09", "question": "How long is apparel covered by the warranty?", "relevant_sources": ["warranty.md"], "expected_terms": ["2 years"]},
+    {"id": "q10", "question": "How do I file a warranty claim?", "relevant_sources": ["warranty.md"], "expected_terms": ["photos"]},
+    {"id": "q11", "question": "Does the warranty cover accidents?", "relevant_sources": ["warranty.md"], "expected_terms": ["accidents"]},
+    {"id": "q12", "question": "How many loyalty points do I earn per dollar?", "relevant_sources": ["loyalty-program.md"], "expected_terms": ["1 point"]},
+    {"id": "q13", "question": "When do loyalty points expire?", "relevant_sources": ["loyalty-program.md"], "expected_terms": ["12 months"]},
+    {"id": "q14", "question": "How do I reach Summit tier?", "relevant_sources": ["loyalty-program.md"], "expected_terms": ["1000 dollars"]},
+    {"id": "q15", "question": "How long after purchase can I ask for a price match?", "relevant_sources": ["price-match.md"], "expected_terms": ["14 days"]},
+    {"id": "q16", "question": "Do you price match marketplace sellers?", "relevant_sources": ["price-match.md"], "expected_terms": ["marketplace"]},
+    {"id": "q17", "question": "Do gift cards expire?", "relevant_sources": ["gift-cards.md"], "expected_terms": ["never expire"]},
+    {"id": "q18", "question": "Can a lost gift card be replaced?", "relevant_sources": ["gift-cards.md"], "expected_terms": ["receipt"]},
+    {"id": "q19", "question": "What does it cost to rent a tent?", "relevant_sources": ["rentals.md"], "expected_terms": ["20 percent"]},
+    {"id": "q20", "question": "What is the fee for returning a rental late?", "relevant_sources": ["rentals.md"], "expected_terms": ["10 dollar"]},
+    {"id": "q21", "question": "How long do repairs usually take?", "relevant_sources": ["repairs.md"], "expected_terms": ["3 weeks"]},
+    {"id": "q22", "question": "Are repairs free for items under warranty?", "relevant_sources": ["repairs.md"], "expected_terms": ["free"]},
+    {"id": "q23", "question": "What standard is your down insulation certified to?", "relevant_sources": ["sustainability.md"], "expected_terms": ["Responsible Down Standard"]},
+    {"id": "q24", "question": "What is the Second Trail program?", "relevant_sources": ["sustainability.md"], "expected_terms": ["store credit"]},
+    {"id": "q25", "question": "What time do stores open on Sunday?", "relevant_sources": ["store-hours.md"], "expected_terms": ["11 am"]},
+    {"id": "q26", "question": "Which holidays are stores closed?", "relevant_sources": ["store-hours.md"], "expected_terms": ["Thanksgiving"]},
+    {"id": "q27", "question": "How many days of paid time off do full time employees get?", "relevant_sources": ["employee-handbook.md"], "expected_terms": ["15 days"]},
+    {"id": "q28", "question": "What is the employee merchandise discount?", "relevant_sources": ["employee-handbook.md"], "expected_terms": ["40 percent"]},
+    {"id": "q29", "question": "What is the daily meal allowance?", "relevant_sources": ["expense-policy.md"], "expected_terms": ["60 dollars"]},
+    {"id": "q30", "question": "When are receipts required for expenses?", "relevant_sources": ["expense-policy.md"], "expected_terms": ["25 dollars"]},
+    {"id": "q31", "question": "What is the minimum password length?", "relevant_sources": ["security-policy.md"], "expected_terms": ["14 characters"]},
+    {"id": "q32", "question": "How quickly must a stolen laptop be reported?", "relevant_sources": ["security-policy.md"], "expected_terms": ["24 hours"]},
+    {"id": "q33", "question": "How should I wash a down jacket?", "relevant_sources": ["product-care.md"], "expected_terms": ["gentle cycle"]},
+    {"id": "q34", "question": "How much is a beginner climbing clinic?", "relevant_sources": ["membership-events.md"], "expected_terms": ["35 dollars"]},
+    {"id": "q35", "question": "Can I get my money back if I send something back within a month?", "relevant_sources": ["refund-policy.md"], "expected_terms": ["30 days"], "tags": ["paraphrase"]},
+    {"id": "q36", "question": "My tent pole snapped because of a factory fault. Am I covered?", "relevant_sources": ["warranty.md", "repairs.md"], "expected_terms": ["lifetime"], "tags": ["paraphrase"]},
+    {"id": "q37", "question": "Can I work from home?", "relevant_sources": ["employee-handbook.md"], "expected_terms": ["2 days"], "tags": ["paraphrase"]},
+    {"id": "q38", "question": "Another shop sells the same jacket for less. Will you lower my price?", "relevant_sources": ["price-match.md"], "expected_terms": ["identical"], "tags": ["paraphrase"]},
+    {"id": "q39", "question": "Is two factor login mandatory for my inbox?", "relevant_sources": ["security-policy.md"], "expected_terms": ["Multi factor"], "tags": ["paraphrase"]},
+    {"id": "q40", "question": "What cabin can staff fly in on a short business trip?", "relevant_sources": ["expense-policy.md"], "expected_terms": ["economy"], "tags": ["paraphrase"]},
+    {"id": "u01", "question": "What is the CEO's home address?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u02", "question": "Do you sell electric bicycles?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u03", "question": "What was last quarter's revenue?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u04", "question": "Is there parental leave for new fathers?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u05", "question": "Can I pay with cryptocurrency?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u06", "question": "What is the stock ticker symbol?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u07", "question": "Who won the football match yesterday?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u08", "question": "What is the wifi password at the Portland store?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u09", "question": "Do you offer ski tuning?", "relevant_sources": [], "tags": ["unanswerable"]},
+    {"id": "u10", "question": "What is the dental insurance provider for employees?", "relevant_sources": [], "tags": ["unanswerable"]}
+  ]
+}

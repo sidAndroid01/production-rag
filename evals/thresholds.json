@@ -1,0 +1,27 @@
+{
+  "memory": {
+    "min": {
+      "recall_at_5": 0.95,
+      "mrr": 0.85,
+      "paraphrase_recall_at_5": 0.9,
+      "answer_rate": 0.8,
+      "abstention_accuracy": 0.7,
+      "citation_precision": 0.85,
+      "expected_term_recall": 0.7
+    },
+    "max": {"latency_p95_ms": 50}
+  },
+  "postgres": {
+    "min": {
+      "recall_at_1": 0.95,
+      "recall_at_5": 1.0,
+      "mrr": 0.95,
+      "paraphrase_recall_at_5": 1.0,
+      "answer_rate": 0.95,
+      "abstention_accuracy": 0.8,
+      "citation_precision": 0.9,
+      "expected_term_recall": 0.95
+    },
+    "max": {"latency_p95_ms": 500}
+  }
+}

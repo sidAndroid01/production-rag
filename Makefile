@@ -26,6 +26,6 @@ typecheck:
 	uv run mypy
 
 eval:
-	uv run python -m evals.evaluate
+	uv run python -m evals.evaluate --check
 
 check: lint typecheck test
