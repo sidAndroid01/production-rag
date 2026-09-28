@@ -51,7 +51,11 @@ class FakePersistence:
                     "score": 0.9,
                 }
             )
-        return SimpleNamespace(chunks_written=len(embeddings), already_existed=False)
+        return SimpleNamespace(
+            document_id=ingested.document_id,
+            chunks_written=len(embeddings),
+            already_existed=False,
+        )
 
     def search_similar(
         self, tenant_id: str, query_embedding: list[float], limit: int, model_name: str

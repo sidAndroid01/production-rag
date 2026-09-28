@@ -339,6 +339,36 @@ What changed:
 
 **Android-developer translation:** this is the equivalent of making sure the APK you upload is built from the module your unit tests cover, and moving Room schema changes from "recreate the database" to numbered `Migration(n, n+1)` objects that run once per install.
 
+## Phase 12: API correctness
+
+Phase 10 grew the API faster than its dispatch code. The HTTP handler only implemented `do_GET` and `do_POST`, so `DELETE /v1/documents/{id}` worked in unit tests that called `handle()` directly but returned `501` to every real client. Jobs could be submitted but their status could not be read, a failing job recorded only `"failed"`, and the handler object was created at import time, which started a worker thread whenever any module imported `api.py`.
+
+`api.py` now has a small route table instead of a chain of `if` statements:
+
+```text
+(method, path pattern) → handler method
+  path matches, method does not → 405
+  nothing matches               → 404
+  protected route               → API key checked before the body is parsed
+```
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/documents` | list the tenant's documents |
+| `GET /v1/documents/{id}` | one document's metadata |
+| `DELETE /v1/documents/{id}` | delete a document and its chunks (now reachable over HTTP) |
+| `GET /v1/ingestion/jobs/{id}` | job status, result, and failure reason; visible only to the submitting tenant |
+
+Other corrections:
+
+- Identical uploads return `200` with `already_existed: true` in memory as well as in PostgreSQL, so re-uploading no longer duplicates evidence in answers. A new upload returns `201`.
+- Empty documents are rejected with `422` in both storage modes.
+- Job input is validated before it is queued; a job that fails later records why (input errors verbatim, unexpected errors as a generic message with the full traceback in the log).
+- The request ID is echoed in an `x-request-id` response header; the body length is checked against the limit before reading.
+- A new PostgreSQL integration suite found that `list_chunks()` had always failed on a real database (`created_at` was ambiguous across the join). It is fixed and now covered.
+
+**Android-developer translation:** the route table is a navigation graph: each destination is declared once, and an unknown deep link has a defined result instead of falling through to whatever handler happens to be last.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -349,12 +379,12 @@ The repository will grow in this order:
 4. **Phase 4 — PostgreSQL persistence:** durable metadata, transactional chunks, idempotency, and pgvector readiness.
 5. **Phase 5 — API/database integration (this commit):** database-backed ingestion, tenant-scoped reads, and readiness checks.
 6. **Phase 6 — local embeddings and pgvector retrieval:** local model adapter, stored vectors, HNSW cosine index, and tenant-scoped SQL vector search.
-7. **Phase 7 — hybrid retrieval and deterministic reranking (this phase):** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
-8. **Phase 8 — tenant security and document lifecycle (this phase):** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
-9. **Phase 9 — ingestion and evaluation (this phase):** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
-10. **Phase 10 — pluggable chat and platform adapters (this phase):** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
-11. **Phase 11 — runnable and verified (this phase):** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
-12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
+7. **Phase 7 — hybrid retrieval and deterministic reranking:** PostgreSQL full-text search, GIN index, rank fusion, and transparent second-stage scoring.
+8. **Phase 8 — tenant security and document lifecycle:** forced PostgreSQL row-level security, tenant session context, migration marker, and tenant-scoped document deletion.
+9. **Phase 9 — ingestion and evaluation:** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
+10. **Phase 10 — pluggable chat and platform adapters:** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
+11. **Phase 11 — runnable and verified:** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
+12. **Phase 12 — API correctness (this phase):** a route table, working DELETE, document listing, job status, and recorded job failures.
 13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
 14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.

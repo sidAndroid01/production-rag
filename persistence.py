@@ -306,13 +306,42 @@ class PostgresPersistence:
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
             cursor.execute(
-                "SELECT id, tenant_id, document_id, chunk_index, text, created_at, "
-                f"source FROM chunks JOIN documents USING (tenant_id, document_id) WHERE {where} "
+                "SELECT c.id, tenant_id, document_id, c.chunk_index, c.text, c.created_at, "
+                "d.source FROM chunks AS c JOIN documents AS d USING (tenant_id, document_id) "
+                f"WHERE {where} "
                 "ORDER BY document_id, chunk_index",
                 parameters,
             )
             columns = [column.name for column in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    DOCUMENT_COLUMNS = (
+        "document_id, source, content_sha256, status, chunk_count, created_at, updated_at"
+    )
+
+    def _select_documents(
+        self, tenant_id: str, where: str, parameters: Sequence[Any]
+    ) -> list[dict[str, Any]]:
+        if not tenant_id.strip():
+            raise ValueError("tenant_id is required")
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
+            cursor.execute(
+                f"SELECT {self.DOCUMENT_COLUMNS} FROM documents "
+                f"WHERE tenant_id = %s {where} ORDER BY created_at DESC, document_id",
+                (tenant_id, *parameters),
+            )
+            columns = [column.name for column in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    def list_documents(self, tenant_id: str) -> list[dict[str, Any]]:
+        """Return the tenant's document metadata, newest first."""
+        return self._select_documents(tenant_id, "", ())
+
+    def get_document(self, tenant_id: str, document_id: str) -> dict[str, Any] | None:
+        """Return one tenant-owned document's metadata, or None."""
+        rows = self._select_documents(tenant_id, "AND document_id = %s", (document_id,))
+        return rows[0] if rows else None
 
     def delete_document(self, tenant_id: str, document_id: str) -> bool:
         """Delete one tenant-owned document; its chunks cascade at the database."""
