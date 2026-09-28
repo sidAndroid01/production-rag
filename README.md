@@ -307,7 +307,7 @@ The chunker now targets token-like whitespace units instead of character counts,
 
 The chat path is now available at `POST /v1/chat`. It keeps bounded history by tenant, user, and session, then sends the retrieved evidence and previous turns to a model provider. By default the repository uses a free extractive fallback. To use a personal OpenAI-compatible provider, set `RAG_MODEL_BASE_URL`, `RAG_MODEL_API_KEY`, and `RAG_MODEL_NAME`; this also works with Ollama, vLLM, and LM Studio endpoints. The API never stores the key in the repository.
 
-`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation. `reranker.py` can load a local Sentence Transformers cross-encoder when the `reranking` extra is installed (`uv sync --extra reranking`), and falls back to the deterministic reranker when it is unavailable.
+`POST /v1/ingestion/jobs` demonstrates asynchronous ingestion through a background worker. It is intentionally an in-process queue for learning; a durable queue such as Redis, SQS, or Kafka is still required for multi-instance production deployments. `permissions.py` defines the principal and group-ACL boundary before evidence reaches generation (enforced from Phase 13). `reranker.py` can load a local Sentence Transformers cross-encoder when the `reranking` extra is installed (`uv sync --extra reranking`), and falls back to the deterministic reranker when it is unavailable.
 
 ## Phase 11: one runnable, verified application
 
@@ -369,6 +369,33 @@ Other corrections:
 
 **Android-developer translation:** the route table is a navigation graph: each destination is declared once, and an unknown deep link has a defined result instead of falling through to whatever handler happens to be last.
 
+## Phase 13: server-side identity and document ACLs
+
+Until now the client chose its own identity. `tenant_id`, `user_id`, and `groups` all came from the JSON body; one shared API key admitted everyone; and a deployment could only serve the single tenant pinned by `RAG_TENANT_ID`. The group ACL in `permissions.py` read an `allowed_groups` field that did not exist in the schema, so it allowed every row, and a caller could have claimed any group anyway.
+
+```text
+x-api-key
+  → SHA-256 digest → server-side key table → Principal(tenant_id, user_id, groups)
+  → body tenant_id, if present, must equal the principal's (else 403)
+  → SQL: tenant RLS + (no ACL OR ACL ∩ groups) before LIMIT
+  → Python: can_read() re-checks each row before it becomes evidence
+```
+
+- [`auth.py`](auth.py) maps keys to principals. Keys are stored only as SHA-256 digests in the file named by `RAG_API_KEYS_FILE`; [`scripts/create_api_key.py`](scripts/create_api_key.py) generates a key and its entry. Without a key file, a single `RAG_API_KEY` is bound to `RAG_TENANT_ID` for local use, and `APP_ENV=production` refuses to start with the built-in development key.
+- One process now serves any number of tenants: each request runs as its key's tenant.
+- [`migrations/003_document_acl.sql`](migrations/003_document_acl.sql) adds `documents.allowed_groups` (empty means tenant-wide). Uploads accept `"allowed_groups": ["hr"]`.
+- The ACL is applied in SQL for vector search, keyword search, listing, get, and delete, before `LIMIT`. Filtering only after retrieval would let restricted rows occupy the top-k slots and leave an authorized user with no evidence. A restricted document is indistinguishable from a missing one (`404`) to users outside its groups.
+- Body `user_id` and `groups` are ignored. Chat history is keyed by the authenticated user.
+
+```bash
+python scripts/create_api_key.py --tenant acme --user alice --groups hr
+# add the printed entry to secrets/api-keys.json, then set RAG_API_KEYS_FILE
+```
+
+Deduplication is per tenant and content: re-uploading identical bytes with a different ACL returns the existing document unchanged. Changing a document's ACL is a delete and re-upload for now.
+
+**Android-developer translation:** this is the difference between trusting a `userId` extra in an `Intent` and reading the signed-in account from the server session. The client may say who it is; only the credential decides.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -384,8 +411,8 @@ The repository will grow in this order:
 9. **Phase 9 — ingestion and evaluation:** token-aware sentence-bounded chunks, a versioned golden set, and retrieval metrics.
 10. **Phase 10 — pluggable chat and platform adapters:** model provider configuration, bounded multi-turn history, worker queue, ACL boundary, and optional learned reranking.
 11. **Phase 11 — runnable and verified:** one canonical app, migration runner, restricted DB role without committed passwords, full-stack Compose, container image, and CI against real PostgreSQL.
-12. **Phase 12 — API correctness (this phase):** a route table, working DELETE, document listing, job status, and recorded job failures.
-13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
+12. **Phase 12 — API correctness:** a route table, working DELETE, document listing, job status, and recorded job failures.
+13. **Phase 13 — server-side identity (this phase):** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
 14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
 16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.

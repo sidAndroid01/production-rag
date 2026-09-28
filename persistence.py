@@ -16,6 +16,10 @@ from typing import Any
 
 from embeddings import DIMENSIONS, MODEL_NAME
 
+# Rows are visible when the document has no ACL or shares a group with the
+# caller. Applied in SQL before LIMIT so restricted rows never use top-k slots.
+ACL_FILTER = "(cardinality(d.allowed_groups) = 0 OR d.allowed_groups && %s::text[])"
+
 
 @dataclass(frozen=True, slots=True)
 class PersistResult:
@@ -65,6 +69,7 @@ class PostgresPersistence:
         result: Any,
         embeddings: Sequence[Sequence[float]],
         model_name: str = MODEL_NAME,
+        allowed_groups: Sequence[str] = (),
     ) -> PersistResult:
         """Atomically upsert one ingestion result and its chunks.
 
@@ -94,13 +99,21 @@ class PostgresPersistence:
             cursor.execute(
                 """
                     INSERT INTO documents
-                        (document_id, tenant_id, source, content_sha256, chunk_count)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (document_id, tenant_id, source, content_sha256, chunk_count,
+                         allowed_groups)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tenant_id, content_sha256) DO UPDATE
                         SET updated_at = now()
                     RETURNING document_id, (xmax = 0) AS inserted
                     """,
-                (result.document_id, tenant_id, source, result.content_sha256, len(chunks)),
+                (
+                    result.document_id,
+                    tenant_id,
+                    source,
+                    result.content_sha256,
+                    len(chunks),
+                    list(allowed_groups),
+                ),
             )
             document_id, inserted = cursor.fetchone()
             if not inserted:
@@ -141,8 +154,9 @@ class PostgresPersistence:
         query_embedding: Sequence[float],
         limit: int = 5,
         model_name: str = MODEL_NAME,
+        groups: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
-        """Find nearest chunks, filtering tenant and model before returning evidence."""
+        """Find nearest chunks, filtering tenant, ACL and model before ranking."""
         vector = [float(value) for value in query_embedding]
         if not tenant_id.strip():
             raise ValueError("tenant_id is required")
@@ -156,17 +170,20 @@ class PostgresPersistence:
             cursor.execute(
                 """
                     SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
-                           c.created_at, d.source,
+                           c.created_at, d.source, d.allowed_groups,
                            1 - (c.embedding <=> %s::vector) AS score
                     FROM chunks AS c
                     JOIN documents AS d USING (tenant_id, document_id)
                     WHERE c.tenant_id = %s
                       AND c.embedding IS NOT NULL
                       AND c.embedding_model = %s
+                      AND """
+                + ACL_FILTER
+                + """
                     ORDER BY c.embedding <=> %s::vector
                     LIMIT %s
                     """,
-                (vector_literal, tenant_id, model_name, vector_literal, limit),
+                (vector_literal, tenant_id, model_name, list(groups), vector_literal, limit),
             )
             columns = [column.name for column in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
@@ -179,6 +196,7 @@ class PostgresPersistence:
         limit: int = 5,
         candidate_limit: int = 50,
         model_name: str = MODEL_NAME,
+        groups: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         """Retrieve semantic and keyword candidates, then fuse and rerank them.
 
@@ -200,72 +218,66 @@ class PostgresPersistence:
         vector_literal = "[" + ",".join(map(str, vector)) + "]"
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
+            columns = (
+                "c.id, c.tenant_id, c.document_id, c.chunk_index, c.text, "
+                "c.created_at, d.source, d.allowed_groups"
+            )
             cursor.execute(
-                """
-                SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
-                       c.created_at, d.source,
-                       1 - (c.embedding <=> %s::vector) AS semantic_score
+                f"""
+                SELECT {columns}, 1 - (c.embedding <=> %s::vector) AS semantic_score
                 FROM chunks AS c
                 JOIN documents AS d USING (tenant_id, document_id)
                 WHERE c.tenant_id = %s AND c.embedding IS NOT NULL
                   AND c.embedding_model = %s
+                  AND {ACL_FILTER}
                 ORDER BY c.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (vector_literal, tenant_id, model_name, vector_literal, candidate_limit),
+                (
+                    vector_literal,
+                    tenant_id,
+                    model_name,
+                    list(groups),
+                    vector_literal,
+                    candidate_limit,
+                ),
             )
-            semantic_rows = cursor.fetchall()
+            names = [column.name for column in cursor.description]
+            semantic_rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
             cursor.execute(
-                """
-                SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
-                       c.created_at, d.source,
+                f"""
+                SELECT {columns},
                        ts_rank_cd(c.search_vector, plainto_tsquery('english', %s)) AS keyword_score
                 FROM chunks AS c
                 JOIN documents AS d USING (tenant_id, document_id)
                 WHERE c.tenant_id = %s
                   AND c.search_vector @@ plainto_tsquery('english', %s)
+                  AND {ACL_FILTER}
                 ORDER BY keyword_score DESC, c.chunk_index
                 LIMIT %s
                 """,
-                (query_text, tenant_id, query_text, candidate_limit),
+                (query_text, tenant_id, query_text, list(groups), candidate_limit),
             )
-            keyword_rows = cursor.fetchall()
+            names = [column.name for column in cursor.description]
+            keyword_rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
         # Rank fusion avoids pretending that cosine and ts_rank_cd are on the
         # same scale. The second-stage score also rewards exact query terms.
         candidates: dict[Any, dict[str, Any]] = {}
         for rank, row in enumerate(semantic_rows, start=1):
-            candidates[row[0]] = {
-                "id": row[0],
-                "tenant_id": row[1],
-                "document_id": row[2],
-                "chunk_index": row[3],
-                "text": row[4],
-                "created_at": row[5],
-                "source": row[6],
-                "semantic_score": float(row[7] or 0.0),
+            candidates[row["id"]] = {
+                **row,
+                "semantic_score": float(row["semantic_score"] or 0.0),
                 "keyword_score": 0.0,
                 "semantic_rank": rank,
                 "keyword_rank": None,
             }
         for rank, row in enumerate(keyword_rows, start=1):
             candidate = candidates.setdefault(
-                row[0],
-                {
-                    "id": row[0],
-                    "tenant_id": row[1],
-                    "document_id": row[2],
-                    "chunk_index": row[3],
-                    "text": row[4],
-                    "created_at": row[5],
-                    "source": row[6],
-                    "semantic_score": 0.0,
-                    "keyword_score": 0.0,
-                    "semantic_rank": None,
-                    "keyword_rank": rank,
-                },
+                row["id"],
+                {**row, "semantic_score": 0.0, "semantic_rank": None},
             )
-            candidate["keyword_score"] = float(row[7] or 0.0)
+            candidate["keyword_score"] = float(row["keyword_score"] or 0.0)
             candidate["keyword_rank"] = rank
 
         query_terms = set(re.findall(r"[a-zA-Z0-9]+", query_text.lower()))
@@ -294,12 +306,14 @@ class PostgresPersistence:
             key=lambda row: (-row["score"], row["document_id"], row["chunk_index"]),
         )[:limit]
 
-    def list_chunks(self, tenant_id: str, document_id: str | None = None) -> list[dict[str, Any]]:
+    def list_chunks(
+        self, tenant_id: str, document_id: str | None = None, groups: Sequence[str] = ()
+    ) -> list[dict[str, Any]]:
         """Return ordered, tenant-scoped chunks for the query adapter."""
         if not tenant_id.strip():
             raise ValueError("tenant_id is required")
-        where = "tenant_id = %s"
-        parameters: list[Any] = [tenant_id]
+        where = f"tenant_id = %s AND {ACL_FILTER}"
+        parameters: list[Any] = [tenant_id, list(groups)]
         if document_id is not None:
             where += " AND document_id = %s"
             parameters.append(document_id)
@@ -316,42 +330,47 @@ class PostgresPersistence:
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     DOCUMENT_COLUMNS = (
-        "document_id, source, content_sha256, status, chunk_count, created_at, updated_at"
+        "document_id, source, content_sha256, status, chunk_count, allowed_groups, "
+        "created_at, updated_at"
     )
 
     def _select_documents(
-        self, tenant_id: str, where: str, parameters: Sequence[Any]
+        self, tenant_id: str, groups: Sequence[str], where: str, parameters: Sequence[Any]
     ) -> list[dict[str, Any]]:
         if not tenant_id.strip():
             raise ValueError("tenant_id is required")
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
             cursor.execute(
-                f"SELECT {self.DOCUMENT_COLUMNS} FROM documents "
-                f"WHERE tenant_id = %s {where} ORDER BY created_at DESC, document_id",
-                (tenant_id, *parameters),
+                f"SELECT {self.DOCUMENT_COLUMNS} FROM documents AS d "
+                f"WHERE tenant_id = %s AND {ACL_FILTER} {where} "
+                "ORDER BY created_at DESC, document_id",
+                (tenant_id, list(groups), *parameters),
             )
             columns = [column.name for column in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
-    def list_documents(self, tenant_id: str) -> list[dict[str, Any]]:
-        """Return the tenant's document metadata, newest first."""
-        return self._select_documents(tenant_id, "", ())
+    def list_documents(self, tenant_id: str, groups: Sequence[str] = ()) -> list[dict[str, Any]]:
+        """Return the caller-visible document metadata, newest first."""
+        return self._select_documents(tenant_id, groups, "", ())
 
-    def get_document(self, tenant_id: str, document_id: str) -> dict[str, Any] | None:
-        """Return one tenant-owned document's metadata, or None."""
-        rows = self._select_documents(tenant_id, "AND document_id = %s", (document_id,))
+    def get_document(
+        self, tenant_id: str, document_id: str, groups: Sequence[str] = ()
+    ) -> dict[str, Any] | None:
+        """Return one caller-visible document's metadata, or None."""
+        rows = self._select_documents(tenant_id, groups, "AND document_id = %s", (document_id,))
         return rows[0] if rows else None
 
-    def delete_document(self, tenant_id: str, document_id: str) -> bool:
-        """Delete one tenant-owned document; its chunks cascade at the database."""
+    def delete_document(self, tenant_id: str, document_id: str, groups: Sequence[str] = ()) -> bool:
+        """Delete one caller-visible document; its chunks cascade at the database."""
         if not tenant_id.strip() or not document_id.strip():
             raise ValueError("tenant_id and document_id are required")
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
             cursor.execute(
-                "DELETE FROM documents WHERE tenant_id = %s AND document_id = %s",
-                (tenant_id.strip(), document_id.strip()),
+                "DELETE FROM documents AS d WHERE tenant_id = %s AND document_id = %s "
+                f"AND {ACL_FILTER}",
+                (tenant_id.strip(), document_id.strip(), list(groups)),
             )
             return bool(cursor.rowcount == 1)
 

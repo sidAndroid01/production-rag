@@ -36,11 +36,17 @@ services:
       - "${API_PORT:-8000}:8000"
     environment:
       DATABASE_URL: postgresql://rag_app:${RAG_APP_DB_PASSWORD}@postgres:5432/rag
+      APP_ENV: production
+      # Single-key mode: RAG_API_KEY is bound to RAG_TENANT_ID.
       RAG_TENANT_ID: ${RAG_TENANT_ID:-default}
-      RAG_API_KEY: ${RAG_API_KEY:?Set RAG_API_KEY in .env}
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      # Multi-tenant mode: a JSON key file (see auth.py); uncomment the volume.
+      RAG_API_KEYS_FILE: ${RAG_API_KEYS_FILE:-}
       RAG_MODEL_BASE_URL: ${RAG_MODEL_BASE_URL:-}
       RAG_MODEL_API_KEY: ${RAG_MODEL_API_KEY:-}
       RAG_MODEL_NAME: ${RAG_MODEL_NAME:-}
+    # volumes:
+    #   - ./secrets/api-keys.json:/run/secrets/api-keys.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

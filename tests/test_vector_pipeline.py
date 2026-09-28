@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from api import ApiError, RagApiApplication
+from auth import ApiKeyStore, hash_key
 from embeddings import DIMENSIONS, LocalFastEmbedder
+from permissions import Principal
 from persistence import PostgresPersistence
 from query import RagQueryPipeline
 
@@ -35,7 +37,13 @@ class FakePersistence:
     def check_connection(self) -> None:
         return
 
-    def persist(self, result: object, embeddings: list[list[float]], model_name: str) -> object:
+    def persist(
+        self,
+        result: object,
+        embeddings: list[list[float]],
+        model_name: str,
+        allowed_groups: tuple[str, ...] = (),
+    ) -> object:
         self.persist_calls += 1
         ingested = result
         for chunk, _vector in zip(ingested.chunks, embeddings, strict=True):
@@ -70,24 +78,37 @@ class FakePersistence:
         query_embedding: list[float],
         limit: int,
         model_name: str,
+        groups: list[str],
     ) -> list[dict[str, object]]:
-        del query_text, query_embedding, model_name
+        del query_text, query_embedding, model_name, groups
         return [row for row in self.chunks if row["tenant_id"] == tenant_id][:limit]
 
 
+KEYS = ApiKeyStore(
+    {
+        hash_key("test-key"): Principal("tenant-a", "alice"),
+        hash_key("tenant-b-key"): Principal("tenant-b", "bob"),
+    }
+)
+
+
 def _call(
-    app: RagApiApplication, method: str, path: str, payload: dict[str, str] | None = None
+    app: RagApiApplication,
+    method: str,
+    path: str,
+    payload: dict[str, str] | None = None,
+    key: str = "test-key",
 ) -> tuple[int, dict[str, object]]:
     body = b"" if payload is None else json.dumps(payload).encode()
     try:
-        return app.handle(method, path, {"x-api-key": "test-key"}, body)
+        return app.handle(method, path, {"x-api-key": key}, body)
     except ApiError as exc:
         return int(exc.status), {"detail": exc.message}
 
 
 def test_vector_api_ingests_and_queries_through_persistence() -> None:
     persistence = FakePersistence()
-    app = RagApiApplication(api_key="test-key", persistence=persistence, embedder=FakeEmbedder())
+    app = RagApiApplication(keys=KEYS, persistence=persistence, embedder=FakeEmbedder())
 
     status, ingest = _call(
         app,
@@ -117,7 +138,8 @@ def test_vector_api_ingests_and_queries_through_persistence() -> None:
         app,
         "POST",
         "/v1/query",
-        {"question": "How long are refunds available?", "tenant_id": "tenant-b"},
+        {"question": "How long are refunds available?"},
+        key="tenant-b-key",
     )
     assert status == 200
     assert cross_tenant["grounded"] is False
@@ -128,9 +150,7 @@ def test_injection_query_is_rejected_before_embedding() -> None:
         def embed_query(self, text: str) -> list[float]:
             raise AssertionError("invalid query reached the embedding model")
 
-    app = RagApiApplication(
-        api_key="test-key", persistence=FakePersistence(), embedder=ShouldNotEmbed()
-    )
+    app = RagApiApplication(keys=KEYS, persistence=FakePersistence(), embedder=ShouldNotEmbed())
     status, _ = _call(
         app,
         "POST",

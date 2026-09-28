@@ -34,8 +34,8 @@ def store() -> PostgresPersistence:
 def tenant(store: PostgresPersistence) -> Iterator[str]:
     tenant_id = f"test-{uuid4().hex[:12]}"
     yield tenant_id
-    for row in store.list_documents(tenant_id):
-        store.delete_document(tenant_id, row["document_id"])
+    for row in store.list_documents(tenant_id, ["hr"]):
+        store.delete_document(tenant_id, row["document_id"], ["hr"])
 
 
 def ingest(store: PostgresPersistence, tenant_id: str, text: str, name: str = "a.txt") -> str:
@@ -75,3 +75,25 @@ def test_hybrid_search_returns_only_the_tenants_rows(
     finally:
         for row in store.list_documents(other):
             store.delete_document(other, row["document_id"])
+
+
+def test_acl_is_enforced_in_sql_before_top_k(store: PostgresPersistence, tenant: str) -> None:
+    public = RagIngestionPipeline().ingest(b"Public refund policy text.", "public.txt", tenant)
+    store.persist(public, vectors(1))
+    for index in range(3):
+        secret = RagIngestionPipeline().ingest(
+            f"Restricted refund memo {index}.".encode(), f"hr-{index}.txt", tenant
+        )
+        store.persist(secret, vectors(1), allowed_groups=["hr"])
+    # limit=1: restricted rows must not take the only slot from the caller.
+    outsider = store.search_hybrid(tenant, "refund", vectors(1)[0], limit=1, candidate_limit=1)
+    assert [row["source"] for row in outsider] == ["public.txt"]
+    insider = store.search_hybrid(tenant, "refund", vectors(1)[0], limit=4, groups=["hr"])
+    assert len(insider) == 4
+    assert {row["source"] for row in store.list_documents(tenant)} == {"public.txt"}
+    hr_id = next(
+        row["document_id"] for row in store.list_documents(tenant, ["hr"]) if row["allowed_groups"]
+    )
+    assert store.get_document(tenant, hr_id) is None
+    assert store.delete_document(tenant, hr_id) is False
+    assert store.delete_document(tenant, hr_id, ["hr"]) is True

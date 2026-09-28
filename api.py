@@ -21,9 +21,10 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from auth import ApiKeyStore
 from embeddings import Embedder, LocalFastEmbedder
 from history import ChatHistoryStore
-from permissions import Principal, can_read
+from permissions import Principal, can_read, can_read_groups, normalize_groups
 from persistence import PostgresPersistence
 from providers import ChatTurn, ModelProvider, configured_provider
 from query import RagQueryPipeline, UnsafeQueryError
@@ -46,6 +47,12 @@ class Request:
     params: dict[str, str]
     payload: dict[str, Any]
     request_id: str
+    principal: Principal | None = None
+
+    @property
+    def caller(self) -> Principal:
+        assert self.principal is not None, "route requires authentication"
+        return self.principal
 
 
 Handler = Callable[[Request], tuple[int, dict[str, Any]]]
@@ -67,9 +74,17 @@ class RagApiApplication:
         tenant_id: str | None = None,
         provider: ModelProvider | None = None,
         reranker: CrossEncoderReranker | None = None,
+        keys: ApiKeyStore | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("RAG_API_KEY", "local-development-key")
-        self.tenant_id = tenant_id.strip() if tenant_id and tenant_id.strip() else None
+        # Identity is server-side: each key maps to one tenant, user and groups.
+        # api_key/tenant_id are a shorthand for a single-key deployment.
+        if keys is None:
+            keys = (
+                ApiKeyStore.single(api_key, (tenant_id or "default").strip())
+                if api_key
+                else ApiKeyStore.from_environment()
+            )
+        self.keys = keys
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
@@ -103,19 +118,22 @@ class RagApiApplication:
 
     # -- request plumbing -------------------------------------------------
 
-    def _authenticate(self, headers: dict[str, str]) -> None:
+    def _authenticate(self, headers: dict[str, str]) -> Principal:
         normalized = {key.lower(): value for key, value in headers.items()}
-        if normalized.get("x-api-key") != self.api_key:
+        principal = self.keys.authenticate(normalized.get("x-api-key"))
+        if principal is None:
             raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid or missing API key")
+        return principal
 
-    def _tenant_from_payload(self, payload: dict[str, Any]) -> str:
-        tenant_id = payload.get("tenant_id", self.tenant_id)
-        if not isinstance(tenant_id, str) or not tenant_id.strip():
-            raise ApiError(HTTPStatus.BAD_REQUEST, "tenant_id is required as a non-empty string")
-        normalized = tenant_id.strip()
-        if self.tenant_id is not None and normalized != self.tenant_id:
+    @staticmethod
+    def _tenant(request: Request) -> str:
+        """The caller's tenant. A body tenant_id is optional and must agree."""
+        claimed = request.payload.get("tenant_id")
+        if claimed is not None and (
+            not isinstance(claimed, str) or claimed.strip() != request.caller.tenant_id
+        ):
             raise ApiError(HTTPStatus.FORBIDDEN, "tenant_id does not match authenticated identity")
-        return normalized
+        return request.caller.tenant_id
 
     @staticmethod
     def _json_body(body: bytes) -> dict[str, Any]:
@@ -143,12 +161,16 @@ class RagApiApplication:
             if route_method != method:
                 allowed.append(route_method)
                 continue
-            if requires_auth:
-                self._authenticate(headers)
+            principal = self._authenticate(headers) if requires_auth else None
             if len(body) > self.max_body_bytes:
                 raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
             request = Request(
-                method, route_path, match.groupdict(), self._json_body(body), request_id
+                method,
+                route_path,
+                match.groupdict(),
+                self._json_body(body),
+                request_id,
+                principal,
             )
             status, payload = handler(request)
             return status, {**payload, "request_id": request_id}
@@ -172,23 +194,33 @@ class RagApiApplication:
     # -- documents --------------------------------------------------------
 
     @staticmethod
-    def _validate_document_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    def _document_job(request: Request) -> dict[str, Any]:
+        """Validate an upload and bind it to the caller's tenant."""
+        payload = request.payload
         filename = payload.get("filename")
         content = payload.get("content")
         if not isinstance(filename, str) or not isinstance(content, str):
             raise ValueError("filename and content are required strings")
-        return filename, content
+        return {
+            "tenant_id": RagApiApplication._tenant(request),
+            "filename": filename,
+            "content": content,
+            "allowed_groups": list(normalize_groups(payload.get("allowed_groups"))),
+        }
 
-    def _ingest_document(self, payload: dict[str, Any]) -> dict[str, Any]:
-        filename, content = self._validate_document_payload(payload)
-        tenant_id = self._tenant_from_payload(payload)
-        result = self.ingestion.ingest(content.encode("utf-8"), filename, tenant_id)
+    def _ingest_document(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Ingest a validated job from _document_job; runs inline or on the worker."""
+        tenant_id = job["tenant_id"]
+        allowed_groups = tuple(job["allowed_groups"])
+        result = self.ingestion.ingest(job["content"].encode("utf-8"), job["filename"], tenant_id)
         if not result.chunks:
             raise ValueError("document has no text to index")
         if self.persistence is not None:
             assert self.embedder is not None
             embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
-            stored = self.persistence.persist(result, embeddings, self.embedder.model_name)
+            stored = self.persistence.persist(
+                result, embeddings, self.embedder.model_name, allowed_groups
+            )
             document_id = stored.document_id
             chunks_created = stored.chunks_written
             already_existed = stored.already_existed
@@ -204,6 +236,7 @@ class RagApiApplication:
                         "content_sha256": result.content_sha256,
                         "status": "ready",
                         "chunk_count": len(result.chunks),
+                        "allowed_groups": list(allowed_groups),
                         "created_at": now,
                         "updated_at": now,
                     }
@@ -219,48 +252,65 @@ class RagApiApplication:
 
     def _create_document(self, request: Request) -> tuple[int, dict[str, Any]]:
         try:
-            stored = self._ingest_document(request.payload)
+            stored = self._ingest_document(self._document_job(request))
         except (UnicodeError, ValueError) as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
         status = HTTPStatus.OK if stored["already_existed"] else HTTPStatus.CREATED
         return status, stored
 
-    def _documents_for(self, tenant_id: str) -> list[dict[str, Any]]:
-        if self.persistence is not None:
-            rows = self.persistence.list_documents(tenant_id)
-        else:
-            with self._lock:
-                rows = [
-                    dict(meta) for (owner, _), meta in self._documents.items() if owner == tenant_id
-                ]
-            rows.sort(key=lambda row: (row["created_at"], row["document_id"]), reverse=True)
-        return [{key: _iso(value) for key, value in row.items()} for row in rows]
+    def _visible_documents(self, principal: Principal) -> list[dict[str, Any]]:
+        """In-memory documents this principal may read (caller holds no lock)."""
+        with self._lock:
+            return [
+                dict(meta)
+                for (owner, _), meta in self._documents.items()
+                if owner == principal.tenant_id
+                and can_read_groups(meta["allowed_groups"], principal)
+            ]
 
     def _list_documents(self, request: Request) -> tuple[int, dict[str, Any]]:
-        tenant_id = self._tenant_from_payload(request.payload)
-        return HTTPStatus.OK, {"documents": self._documents_for(tenant_id)}
+        principal = request.caller
+        self._tenant(request)
+        if self.persistence is not None:
+            rows = self.persistence.list_documents(principal.tenant_id, sorted(principal.groups))
+        else:
+            rows = self._visible_documents(principal)
+            rows.sort(key=lambda row: (row["created_at"], row["document_id"]), reverse=True)
+        documents = [{key: _iso(value) for key, value in row.items()} for row in rows]
+        return HTTPStatus.OK, {"documents": documents}
 
     def _get_document(self, request: Request) -> tuple[int, dict[str, Any]]:
-        tenant_id = self._tenant_from_payload(request.payload)
+        principal = request.caller
+        self._tenant(request)
         document_id = request.params["document_id"]
         if self.persistence is not None:
-            row = self.persistence.get_document(tenant_id, document_id)
+            row = self.persistence.get_document(
+                principal.tenant_id, document_id, sorted(principal.groups)
+            )
         else:
-            with self._lock:
-                meta = self._documents.get((tenant_id, document_id))
-                row = dict(meta) if meta else None
+            row = next(
+                (r for r in self._visible_documents(principal) if r["document_id"] == document_id),
+                None,
+            )
         if row is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
         return HTTPStatus.OK, {key: _iso(value) for key, value in row.items()}
 
     def _delete_document(self, request: Request) -> tuple[int, dict[str, Any]]:
-        tenant_id = self._tenant_from_payload(request.payload)
+        principal = request.caller
+        tenant_id = self._tenant(request)
         document_id = request.params["document_id"]
         if self.persistence is not None:
-            deleted = self.persistence.delete_document(tenant_id, document_id)
+            deleted = self.persistence.delete_document(
+                tenant_id, document_id, sorted(principal.groups)
+            )
         else:
             with self._lock:
-                deleted = self._documents.pop((tenant_id, document_id), None) is not None
+                meta = self._documents.get((tenant_id, document_id))
+                deleted = meta is not None and can_read_groups(meta["allowed_groups"], principal)
+                if not deleted:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
+                del self._documents[(tenant_id, document_id)]
                 self._chunks = [
                     chunk
                     for chunk in self._chunks
@@ -273,19 +323,15 @@ class RagApiApplication:
     # -- ingestion jobs ---------------------------------------------------
 
     def _submit_job(self, request: Request) -> tuple[int, dict[str, Any]]:
-        tenant_id = self._tenant_from_payload(request.payload)
         try:
-            filename, content = self._validate_document_payload(request.payload)
+            document_job = self._document_job(request)
         except ValueError as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-        job = self.worker.submit(
-            tenant_id, {"filename": filename, "content": content, "tenant_id": tenant_id}
-        )
+        job = self.worker.submit(document_job["tenant_id"], document_job)
         return HTTPStatus.ACCEPTED, job.as_dict()
 
     def _get_job(self, request: Request) -> tuple[int, dict[str, Any]]:
-        tenant_id = self._tenant_from_payload(request.payload)
-        job = self.worker.get(tenant_id, request.params["job_id"])
+        job = self.worker.get(self._tenant(request), request.params["job_id"])
         if job is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "job not found")
         return HTTPStatus.OK, job.as_dict()
@@ -303,7 +349,8 @@ class RagApiApplication:
         question = payload.get("question")
         if not isinstance(question, str):
             raise ApiError(HTTPStatus.BAD_REQUEST, "question is required as a string")
-        tenant_id = self._tenant_from_payload(payload)
+        principal = request.caller
+        tenant_id = self._tenant(request)
         session_id = payload.get("session_id")
         if is_chat and (not isinstance(session_id, str) or not session_id.strip()):
             raise ApiError(HTTPStatus.BAD_REQUEST, "session_id is required for chat")
@@ -314,13 +361,14 @@ class RagApiApplication:
                 safe_question = query.validate_query(question, tenant_id)
                 vector = self.embedder.embed_query(safe_question)
                 rows = self.persistence.search_hybrid(
-                    tenant_id, safe_question, vector, limit=5, model_name=self.embedder.model_name
+                    tenant_id,
+                    safe_question,
+                    vector,
+                    limit=5,
+                    model_name=self.embedder.model_name,
+                    groups=sorted(principal.groups),
                 )
-                groups = payload.get("groups", [])
-                principal = Principal(
-                    user_id=str(payload.get("user_id", "anonymous")),
-                    groups=frozenset(groups) if isinstance(groups, list) else frozenset(),
-                )
+                # SQL already applied the ACL; re-check before evidence is used.
                 rows = [row for row in rows if can_read(row, principal)]
                 rows = self.reranker.rerank(safe_question, rows)
                 ranked = [
@@ -342,8 +390,10 @@ class RagApiApplication:
                     safe_question, tenant_id, ranked, request_id=request.request_id
                 )
             else:
+                readable = {row["document_id"] for row in self._visible_documents(principal)}
                 with self._lock:
-                    query = RagQueryPipeline(tuple(self._chunks))
+                    chunks = tuple(c for c in self._chunks if c.document_id in readable)
+                query = RagQueryPipeline(chunks)
                 result = query.query(question, tenant_id, request_id=request.request_id)
         except UnsafeQueryError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
@@ -351,7 +401,7 @@ class RagApiApplication:
         extra: dict[str, Any] = {}
         if is_chat:
             assert isinstance(session_id, str)
-            user_id = str(payload.get("user_id", "anonymous"))
+            user_id = principal.user_id
             prior = self.history.get(tenant_id, user_id, session_id)
             if result.grounded:
                 answer = self.provider.generate(
@@ -445,14 +495,10 @@ def run() -> None:
     host = os.getenv("RAG_HOST", "127.0.0.1")
     dsn = os.getenv("DATABASE_URL")
     persistence = PostgresPersistence(dsn) if dsn else None
-    configured_tenant = os.getenv("RAG_TENANT_ID")
-    if persistence is not None and (not configured_tenant or not configured_tenant.strip()):
-        raise RuntimeError("RAG_TENANT_ID is required when DATABASE_URL is configured")
     # Schema changes are applied separately by migrate.py as the owner role;
     # the API's restricted role cannot run DDL.
     RequestHandler.application = RagApiApplication(
-        persistence=persistence,
-        tenant_id=configured_tenant,
+        persistence=persistence, keys=ApiKeyStore.from_environment()
     )
     server = ThreadingHTTPServer((host, port), RequestHandler)
     print(f"RAG API listening on http://{host}:{port}")
