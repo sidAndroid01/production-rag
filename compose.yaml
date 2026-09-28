@@ -50,11 +50,18 @@ services:
       RAG_FALLBACK_MODEL_NAME: ${RAG_FALLBACK_MODEL_NAME:-}
       RAG_MODEL_INPUT_PRICE_PER_MTOK: ${RAG_MODEL_INPUT_PRICE_PER_MTOK:-0}
       RAG_MODEL_OUTPUT_PRICE_PER_MTOK: ${RAG_MODEL_OUTPUT_PRICE_PER_MTOK:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RAG_RATE_LIMIT_PER_MINUTE: ${RAG_RATE_LIMIT_PER_MINUTE:-120}
+      RAG_TENANT_DAILY_TOKEN_BUDGET: ${RAG_TENANT_DAILY_TOKEN_BUDGET:-0}
+      RAG_CORS_ORIGINS: ${RAG_CORS_ORIGINS:-}
+      RAG_METRICS_TOKEN: ${RAG_METRICS_TOKEN:-}
     # volumes:
     #   - ./secrets/api-keys.json:/run/secrets/api-keys.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # SIGTERM lets in-flight requests finish before the container stops.
+    stop_grace_period: 30s
     read_only: true
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]

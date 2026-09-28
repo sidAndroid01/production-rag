@@ -1,14 +1,35 @@
 # Production RAG — built phase by phase
 
-This repository is being built phase by phase. **The published foundations now include document ingestion, a deterministic query flow, an authenticated API boundary, PostgreSQL persistence, API/database integration, local embeddings, and pgvector retrieval.** Hosted generation, evaluation, deployment, and remaining production controls will be added in later phases.
+A multi-tenant retrieval-augmented generation API, built in visible phases so every production concern is added, explained, and tested one at a time. It runs on PostgreSQL + pgvector with local embeddings, hybrid retrieval, row-level tenant security, group ACLs, grounded and cited answers, a resilient model gateway, versioned PDF/HTML/Markdown documents, a durable job queue, an evaluation gate in CI, and structured logs and metrics.
+
+## Quick start
+
+```bash
+cp .env.example .env          # set POSTGRES_PASSWORD, RAG_APP_DB_PASSWORD, RAG_API_KEY
+docker compose up --build     # postgres → migrations → api on http://localhost:8000
+
+curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/documents \
+  -d '{"filename": "policy.txt", "content": "Refunds are available within 30 days."}'
+curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
+  -d '{"question": "How long do I have to get a refund?"}'
+```
+
+Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/documents` | upload `content` (text) or `content_base64` (PDF/HTML/Markdown/text); optional `allowed_groups` |
+| `GET /v1/documents[?include_superseded=true]`, `GET` / `DELETE /v1/documents/{id}` | list, inspect, delete |
+| `POST /v1/query` | one question → grounded answer with cited sources (and pages) |
+| `POST /v1/chat` | multi-turn with `session_id`; follow-ups are rewritten for retrieval |
+| `POST /v1/ingestion/jobs`, `GET /v1/ingestion/jobs/{id}` | background ingestion and its status |
+| `GET /health/live`, `GET /health/ready`, `GET /metrics` | probes and Prometheus metrics |
 
 ## Repository history and canonical implementation
 
-This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval.
+This project is built in visible phases. Phases 1–2 begin with pure in-memory ingestion and lexical querying. Phase 3 adds the authenticated HTTP boundary while retaining that fallback. Phases 4–5 add transactional PostgreSQL persistence, selected with `DATABASE_URL`. Phase 6 adds local FastEmbed embeddings and tenant-scoped pgvector cosine retrieval. Phases 7–10 add hybrid retrieval, database security, evaluation, and chat; Phases 11–18 make the whole system correct, measurable, and operable. The [phase plan](#phase-plan) lists each one.
 
-The canonical implementation for these phases is the root-level modules `rag.py`, `query.py`, `api.py`, `persistence.py`, and `embeddings.py`, supported by the ordered SQL files in [`migrations/`](migrations/), the [`migrate.py`](migrate.py) runner, and [`compose.yaml`](compose.yaml). Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration.
-
-The API now supports an explicit tenant identity binding. Set `RAG_TENANT_ID` for a deployed API instance; requests whose body tenant differs from that authenticated identity are rejected. The body field remains visible in the learning API so the data flow is easy to inspect, but production authentication should derive it from an API-key or JWT claim rather than trusting a client-selected tenant.
+The canonical implementation is the root-level modules (`rag.py`, `query.py`, `api.py`, `persistence.py`, `embeddings.py`, and the modules later phases add), supported by the ordered SQL files in [`migrations/`](migrations/), the [`migrate.py`](migrate.py) runner, and [`compose.yaml`](compose.yaml). Real environment files and credentials stay outside Git; `.env.example` documents the expected configuration. The sections below keep each phase's original explanation; where a later phase changed a behavior, the later section says so. For example, identity has come from the API key rather than the request body since Phase 13.
 
 ## What this phase does
 
@@ -542,6 +563,32 @@ Not done here: malware scanning (a ClamAV step before parsing would fit in the j
 
 **Android-developer translation:** the job table is WorkManager backed by a database instead of memory: work survives process death, unique work prevents two workers running the same job, and failed work retries with backoff.
 
+## Phase 18: operations
+
+The API could answer questions but was hard to run: errors were silent (`log_message` discarded every line), nothing measured latency or tokens, one client could exhaust the model budget, every query opened a new database connection, chat history vanished on restart or when a request reached another replica, and `docker stop` killed requests mid-flight.
+
+```text
+request → request ID (from x-request-id or generated)
+        → route → authenticate → rate limit (tenant/user token bucket) → handler
+        → one JSON log line: request_id, route, status, duration_ms, tenant, user
+        → metrics: requests by route/status, latency histogram, tokens, degraded answers
+```
+
+| Concern | Implementation |
+| --- | --- |
+| Logs | [`observability.py`](observability.py) writes JSON lines to stdout. Every request logs exactly once, including failures. `rag.audit` records document create/delete and failed authentication; `rag.usage` records tokens and cost. Unhandled errors log the traceback with the request ID and return `500` with that ID so a user report can be traced. |
+| Metrics | `GET /metrics` in Prometheus text format: `rag_http_requests_total{route,method,status}`, `rag_http_request_duration_seconds` histogram, `rag_generation_tokens_total{model}`, `rag_generation_degraded_total`, `rag_rate_limited_total`. Routes are labelled by handler name, never raw paths. Protect it with `RAG_METRICS_TOKEN`. |
+| Rate limits | token bucket per tenant/user (`RAG_RATE_LIMIT_PER_MINUTE`, default 120) → `429` with `Retry-After`. Health probes are exempt. |
+| Token budget | optional per-tenant daily cap on model tokens (`RAG_TENANT_DAILY_TOKEN_BUDGET`) → `429` until midnight UTC. |
+| Connections | `psycopg_pool` (`RAG_DB_POOL_MAX`, default 10). Tenant context is transaction-local, so a pooled connection never carries one tenant's setting into another request. |
+| Chat history | `chat_messages` table with forced RLS ([`migrations/005_chat_history.sql`](migrations/005_chat_history.sql)), bounded to the window the model uses. |
+| Shutdown | `SIGTERM` stops accepting connections, waits for in-flight requests, stops the worker, and closes the pool. |
+| Transport | 30 s socket timeout against stalled clients; `nosniff`, `no-store`, and `no-referrer` headers; CORS only for origins in `RAG_CORS_ORIGINS` (for the web UI). |
+
+Limits and metrics are per process. That is correct for one replica; with several, move the limiter and budget to Redis and let Prometheus aggregate the per-replica series.
+
+**Android-developer translation:** this is Crashlytics plus Firebase Performance for the backend: every request leaves a breadcrumb with an ID you can search for, dashboards come from counters rather than guesswork, and graceful shutdown is `onStop()` finishing its work instead of the process being killed mid-write.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -562,8 +609,8 @@ The repository will grow in this order:
 14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
 16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
-17. **Phase 17 — document lifecycle (this phase):** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
-18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
+17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
+18. **Phase 18 — operations (this phase):** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

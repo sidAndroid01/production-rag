@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hmac
 import json
 import logging
 import os
 import re
+import signal
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,8 +30,9 @@ from uuid import uuid4
 from auth import ApiKeyStore
 from embeddings import Embedder, LocalFastEmbedder
 from gateway import configured_provider
-from history import ChatHistoryStore
+from history import ChatHistoryStore, PostgresChatHistory
 from memory_store import InMemoryStore
+from observability import DailyTokenBudget, Metrics, RateLimiter, configure_logging
 from parsers import parse
 from permissions import Principal, can_read, normalize_groups
 from persistence import PostgresPersistence
@@ -46,10 +51,14 @@ from workers import IngestionWorker, PostgresJobQueue
 
 
 class ApiError(Exception):
-    def __init__(self, status: HTTPStatus, message: str) -> None:
+    def __init__(
+        self, status: HTTPStatus, message: str, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.headers = headers or {}
+        self.request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +78,9 @@ class Request:
 
 
 Handler = Callable[[Request], tuple[int, dict[str, Any]]]
+logger = logging.getLogger("rag.api")
 usage_logger = logging.getLogger("rag.usage")
+audit_logger = logging.getLogger("rag.audit")
 
 # Calibrated on evals/datasets/golden-v2.json (see README, Phase 15).
 LEXICAL_MIN_SCORE = 0.15
@@ -97,6 +108,8 @@ class RagApiApplication:
         min_score: float | None = None,
         relative_score: float | None = None,
         run_worker: bool | None = None,
+        rate_limiter: RateLimiter | None = None,
+        token_budget: DailyTokenBudget | None = None,
     ) -> None:
         # Identity is server-side: each key maps to one tenant, user and groups.
         # api_key/tenant_id are a shorthand for a single-key deployment.
@@ -123,8 +136,18 @@ class RagApiApplication:
         self.embedder = embedder or (LocalFastEmbedder() if persistence is not None else None)
         self.provider = provider or configured_provider()
         self.reranker = reranker or CrossEncoderReranker()
-        self.history = ChatHistoryStore()
+        self.history: ChatHistoryStore | PostgresChatHistory = (
+            PostgresChatHistory(persistence) if persistence is not None else ChatHistoryStore()
+        )
         self.memory = InMemoryStore()
+        self.metrics = Metrics()
+        # Per caller (tenant/user) request rate, and per tenant daily model tokens.
+        self.rate_limiter = rate_limiter or RateLimiter(
+            float(os.getenv("RAG_RATE_LIMIT_PER_MINUTE", "120"))
+        )
+        self.token_budget = token_budget or DailyTokenBudget(
+            int(os.getenv("RAG_TENANT_DAILY_TOKEN_BUDGET", "0"))
+        )
         # Durable queue with a database; in-process worker for the demo.
         # RAG_RUN_WORKER=0 serves the API without consuming jobs.
         if run_worker is None:
@@ -187,8 +210,62 @@ class RagApiApplication:
     def handle(
         self, method: str, path: str, headers: dict[str, str], body: bytes = b""
     ) -> tuple[int, dict[str, Any]]:
+        """Route one request; log it once and record its metrics, whatever happens."""
         lowered = {key.lower(): value for key, value in headers.items()}
         request_id = lowered.get("x-request-id") or str(uuid4())
+        context: dict[str, Any] = {"route": "unmatched", "principal": None}
+        started = time.perf_counter()
+        status = int(HTTPStatus.INTERNAL_SERVER_ERROR)
+        try:
+            status, payload = self._route(method, path, headers, body, request_id, context)
+            return status, payload
+        except ApiError as exc:
+            status = int(exc.status)
+            exc.request_id = request_id
+            if status == HTTPStatus.UNAUTHORIZED:
+                audit_logger.warning("auth.failed", extra={"request_id": request_id})
+            raise
+        except Exception as exc:
+            logger.exception("unhandled error", extra={"request_id": request_id})
+            error = ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "internal server error")
+            error.request_id = request_id
+            raise error from exc
+        finally:
+            elapsed = time.perf_counter() - started
+            route = context["route"]
+            principal = context["principal"]
+            self.metrics.inc(
+                "rag_http_requests_total",
+                "HTTP requests by route, method and status.",
+                route=route,
+                method=method,
+                status=str(status),
+            )
+            self.metrics.observe_latency(elapsed, route=route)
+            # Orchestrator probes arrive every few seconds; keep them out of INFO logs.
+            logger.log(
+                logging.DEBUG if route in {"live", "ready"} else logging.INFO,
+                "request",
+                extra={
+                    "request_id": request_id,
+                    "method": method,
+                    "route": route,
+                    "status": status,
+                    "duration_ms": round(elapsed * 1000, 2),
+                    "tenant_id": principal.tenant_id if principal else None,
+                    "user_id": principal.user_id if principal else None,
+                },
+            )
+
+    def _route(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+        request_id: str,
+        context: dict[str, Any],
+    ) -> tuple[int, dict[str, Any]]:
         url = urlsplit(path)
         route_path = url.path.rstrip("/") or "/"
         query = {key: values[-1] for key, values in parse_qs(url.query).items()}
@@ -200,7 +277,23 @@ class RagApiApplication:
             if route_method != method:
                 allowed.append(route_method)
                 continue
+            # Label metrics by handler, never by raw path (IDs would explode cardinality).
+            context["route"] = handler.__name__.lstrip("_")
             principal = self._authenticate(headers) if requires_auth else None
+            context["principal"] = principal
+            if principal is not None:
+                wait = self.rate_limiter.acquire(f"{principal.tenant_id}/{principal.user_id}")
+                if wait > 0:
+                    self.metrics.inc(
+                        "rag_rate_limited_total",
+                        "Requests rejected by the rate limiter.",
+                        tenant=principal.tenant_id,
+                    )
+                    raise ApiError(
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        "rate limit exceeded",
+                        {"retry-after": str(max(1, round(wait)))},
+                    )
             if len(body) > self.max_body_bytes:
                 raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
             request = Request(
@@ -217,6 +310,12 @@ class RagApiApplication:
         if allowed:
             raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed")
         raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+
+    def close(self) -> None:
+        """Stop background work and release database connections."""
+        self.worker.stop()
+        if self.persistence is not None:
+            self.persistence.close()
 
     # -- health -----------------------------------------------------------
 
@@ -303,6 +402,17 @@ class RagApiApplication:
             stored = self._ingest_document(self._document_job(request))
         except (UnicodeError, ValueError) as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+        audit_logger.info(
+            "document.created",
+            extra={
+                "request_id": request.request_id,
+                "tenant_id": request.caller.tenant_id,
+                "user_id": request.caller.user_id,
+                "document_id": stored["document_id"],
+                "version": stored["version"],
+                "already_existed": stored["already_existed"],
+            },
+        )
         status = HTTPStatus.OK if stored["already_existed"] else HTTPStatus.CREATED
         return status, stored
 
@@ -338,6 +448,15 @@ class RagApiApplication:
         )
         if not deleted:
             raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
+        audit_logger.info(
+            "document.deleted",
+            extra={
+                "request_id": request.request_id,
+                "tenant_id": principal.tenant_id,
+                "user_id": principal.user_id,
+                "document_id": document_id,
+            },
+        )
         return HTTPStatus.OK, {"document_id": document_id, "deleted": True}
 
     # -- ingestion jobs ---------------------------------------------------
@@ -437,9 +556,27 @@ class RagApiApplication:
         answer, used = ABSTENTION, []
         generation: Generation | None = None
         if evidence:
+            if self.token_budget.remaining(tenant_id) <= 0:
+                raise ApiError(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    "daily token budget exhausted",
+                    {"retry-after": str(self.token_budget.seconds_until_reset())},
+                )
             generation = self.provider.complete(
                 question, [chunk.text for chunk, _ in evidence], prior
             )
+            tokens = generation.prompt_tokens + generation.completion_tokens
+            self.token_budget.spend(tenant_id, tokens)
+            self.metrics.inc(
+                "rag_generation_tokens_total",
+                "Model tokens by model.",
+                tokens,
+                model=generation.model,
+            )
+            if generation.degraded:
+                self.metrics.inc(
+                    "rag_generation_degraded_total", "Answers served by the fallback answerer."
+                )
             candidate = strip_invalid_citations(generation.text, len(evidence))
             used = cited_sources(candidate, len(evidence))
             # An answer that cites nothing is not grounded; return the abstention.
@@ -506,19 +643,41 @@ class RequestHandler(BaseHTTPRequestHandler):
     # Assigned by run() or tests; building it at import would start threads
     # and load models as a side effect of importing this module.
     application: RagApiApplication | None = None
+    # Drop connections that stall mid-request (slow-loris style clients).
+    timeout = 30
+    cors_origins: frozenset[str] = frozenset()
+    metrics_token: str | None = None
 
-    def _respond(self, status: int, payload: dict[str, Any]) -> None:
+    def _common_headers(self) -> None:
+        self.send_header("x-content-type-options", "nosniff")
+        self.send_header("cache-control", "no-store")
+        self.send_header("referrer-policy", "no-referrer")
+        origin = self.headers.get("origin")
+        if origin and origin in self.cors_origins:
+            self.send_header("access-control-allow-origin", origin)
+            self.send_header("vary", "origin")
+            self.send_header("access-control-expose-headers", "x-request-id, retry-after")
+
+    def _respond(
+        self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> None:
         encoded = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(encoded)))
         if "request_id" in payload:
             self.send_header("x-request-id", str(payload["request_id"]))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self._common_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
     def do_GET(self) -> None:
-        self._dispatch()
+        if urlsplit(self.path).path == "/metrics":
+            self._metrics()
+        else:
+            self._dispatch()
 
     def do_POST(self) -> None:
         self._dispatch()
@@ -532,9 +691,40 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         self._dispatch()
 
+    def do_OPTIONS(self) -> None:
+        """CORS preflight for browser clients listed in RAG_CORS_ORIGINS."""
+        self.send_response(HTTPStatus.NO_CONTENT)
+        if self.headers.get("origin") in self.cors_origins:
+            self.send_header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header(
+                "access-control-allow-headers", "content-type, x-api-key, x-request-id"
+            )
+            self.send_header("access-control-max-age", "600")
+        self._common_headers()
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def _metrics(self) -> None:
+        application = self.application
+        assert application is not None
+        expected = self.metrics_token
+        if expected and not hmac.compare_digest(
+            self.headers.get("authorization", ""), f"Bearer {expected}"
+        ):
+            self._respond(HTTPStatus.UNAUTHORIZED, {"detail": "metrics token required"})
+            return
+        encoded = application.metrics.render().encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-type", "text/plain; version=0.0.4")
+        self.send_header("content-length", str(len(encoded)))
+        self._common_headers()
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def _dispatch(self) -> None:
         application = self.application
         assert application is not None, "RequestHandler.application is not configured"
+        extra_headers: dict[str, str] = {}
         try:
             try:
                 length = int(self.headers.get("content-length", "0"))
@@ -548,28 +738,56 @@ class RequestHandler(BaseHTTPRequestHandler):
             status, payload = application.handle(self.command, self.path, dict(self.headers), body)
         except ApiError as exc:
             status, payload = exc.status, {"detail": exc.message}
+            if exc.request_id:
+                payload["request_id"] = exc.request_id
+            extra_headers = exc.headers
         except Exception:
+            logger.exception("transport error")
             status, payload = HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": "internal server error"}
-        self._respond(int(status), payload)
+        self._respond(int(status), payload, extra_headers)
 
     def log_message(self, format: str, *args: object) -> None:
-        return
+        return  # RagApiApplication.handle writes one structured line per request.
+
+
+class GracefulHTTPServer(ThreadingHTTPServer):
+    # Non-daemon request threads + block_on_close: shutdown waits for in-flight requests.
+    daemon_threads = False
+    block_on_close = True
 
 
 def run() -> None:
+    configure_logging(os.getenv("LOG_LEVEL", "INFO"))
     port = int(os.getenv("PORT", "8000"))
     # Loopback by default; containers set RAG_HOST=0.0.0.0 to accept traffic.
     host = os.getenv("RAG_HOST", "127.0.0.1")
     dsn = os.getenv("DATABASE_URL")
-    persistence = PostgresPersistence(dsn) if dsn else None
+    persistence = (
+        PostgresPersistence(dsn, max_size=int(os.getenv("RAG_DB_POOL_MAX", "10"))) if dsn else None
+    )
     # Schema changes are applied separately by migrate.py as the owner role;
     # the API's restricted role cannot run DDL.
-    RequestHandler.application = RagApiApplication(
-        persistence=persistence, keys=ApiKeyStore.from_environment()
+    application = RagApiApplication(persistence=persistence, keys=ApiKeyStore.from_environment())
+    RequestHandler.application = application
+    RequestHandler.cors_origins = frozenset(
+        origin.strip() for origin in os.getenv("RAG_CORS_ORIGINS", "").split(",") if origin.strip()
     )
-    server = ThreadingHTTPServer((host, port), RequestHandler)
-    print(f"RAG API listening on http://{host}:{port}")
-    server.serve_forever()
+    RequestHandler.metrics_token = os.getenv("RAG_METRICS_TOKEN") or None
+    server = GracefulHTTPServer((host, port), RequestHandler)
+
+    def stop(signum: int, frame: object) -> None:
+        logger.info("shutting down", extra={"signal": signum})
+        # shutdown() blocks until serve_forever returns, so call it off this thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    logger.info("listening", extra={"host": host, "port": port})
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        application.close()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,24 +34,45 @@ class PersistResult:
 class PostgresPersistence:
     """Transactional document/chunk repository backed by PostgreSQL + pgvector."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
         if not dsn.strip():
             raise ValueError("dsn is required")
         self.dsn = dsn
+        self._pool_size = (min_size, max_size)
+        self._pool: Any | None = None
+        self._pool_lock = threading.Lock()
 
     def _connect(self) -> Any:
-        try:
-            import psycopg
-        except ImportError as exc:
-            raise RuntimeError("install psycopg[binary] to use PostgreSQL persistence") from exc
-        return psycopg.connect(self.dsn)
+        """Borrow a pooled connection; the block commits on success, else rolls back.
+
+        Tenant context uses ``set_config(..., true)``, which is transaction-local,
+        so a returned connection never carries one tenant into the next request.
+        """
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    try:
+                        from psycopg_pool import ConnectionPool
+                    except ImportError as exc:
+                        raise RuntimeError("install psycopg[binary] and psycopg-pool") from exc
+                    min_size, max_size = self._pool_size
+                    self._pool = ConnectionPool(
+                        self.dsn, min_size=min_size, max_size=max_size, timeout=10, open=True
+                    )
+        return self._pool.connection()
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
     def initialize(self) -> None:
         """Apply pending migrations; the DSN must belong to the schema owner."""
+        import psycopg
+
         from migrate import apply_migrations
 
-        with self._connect() as connection:
-            connection.autocommit = True
+        with psycopg.connect(self.dsn, autocommit=True) as connection:
             apply_migrations(connection)
 
     @staticmethod
