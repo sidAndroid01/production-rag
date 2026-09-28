@@ -503,6 +503,45 @@ Packing keeps sources in rank order and never renumbers them, so `[n]` citations
 
 **Android-developer translation:** this is an OkHttp interceptor chain for model calls: a retry interceptor with backoff, a circuit breaker in front of a flaky backend, and a cached/offline response when the network is down, so the screen shows something useful instead of an error state.
 
+## Phase 17: document lifecycle
+
+Three gaps made the corpus hard to keep correct. Uploading a corrected `handbook.md` added a second copy beside the old one, so both versions competed as evidence. Only UTF-8 text could be uploaded. And background jobs lived in a Python list, so a restart lost them and a second replica could not share the work.
+
+**Versions.** A document's identity is still its content hash, and its *source* is its filename. Uploading new content for an existing source makes it the next version and marks the previous ones `superseded`:
+
+```text
+upload hours.txt (v1) → upload hours.txt with new bytes → v2 ready, v1 superseded
+search / answers      → only 'ready' documents
+GET /v1/documents?include_superseded=true → full history
+re-upload v1's exact bytes → v1 reinstated as version 3 (nothing re-embedded)
+```
+
+A transaction-scoped advisory lock serializes uploads of the same source, so two concurrent uploads cannot both become current. A user can only supersede versions they can read, so an upload cannot hide a document restricted to a group the uploader is not in.
+
+**Formats.** [`parsers.py`](parsers.py) accepts plain text, Markdown, HTML, and PDF. Send text as `content`, or a file as `content_base64` (optionally with `content_type`):
+
+- The type is **sniffed from the bytes**. A declared type or extension that disagrees is rejected, and archives, executables, and images are refused by signature.
+- HTML and PDF are parsed in a **separate Python process** (`python -I`, empty environment) with CPU-time, memory (Linux), and wall-clock limits. A malformed or hostile file kills only that child process; the API returns `422`.
+- PDF text is extracted per page, and chunks never cross a page boundary. Citations now include `page`. Extraction stops at 500 pages or 5 million characters, and encrypted PDFs are refused.
+
+**Durable jobs.** With a database, `POST /v1/ingestion/jobs` writes to the `ingestion_jobs` table ([`migrations/004_document_lifecycle.sql`](migrations/004_document_lifecycle.sql)):
+
+```text
+submit (tenant RLS) → claim_ingestion_job(): FOR UPDATE SKIP LOCKED, oldest runnable first
+  → handler under the job's tenant → completed | failed (input error)
+                                   → queued again with 2^attempt s backoff (other error, < 3 attempts)
+running for > 10 min (crashed worker) → claimable again
+completed or failed → uploaded bytes removed from the row
+```
+
+The claim function is `SECURITY DEFINER`: the worker can pick the next job across tenants, but every read and write of a job's contents still happens under that tenant's row-level security. Any number of replicas can poll safely; set `RAG_RUN_WORKER=0` for API-only replicas. Without a database, the in-process worker (Phase 12) remains.
+
+The in-memory mode now uses [`memory_store.py`](memory_store.py), which follows the same versioning, ACL, and deduplication rules as PostgreSQL, so the demo and the deployment behave alike.
+
+Not done here: malware scanning (a ClamAV step before parsing would fit in the job handler), OCR for scanned PDFs, and storing original files in object storage instead of the job row.
+
+**Android-developer translation:** the job table is WorkManager backed by a database instead of memory: work survives process death, unique work prevents two workers running the same job, and failed work retries with backoff.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -522,8 +561,8 @@ The repository will grow in this order:
 13. **Phase 13 — server-side identity:** API keys map to tenant, user, and groups on the server; persistent document ACLs filtered in SQL.
 14. **Phase 14 — grounded generation:** documents kept out of the system prompt, citations limited to what the answer cites, conversational query rewriting, and calibrated reranker scores.
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
-16. **Phase 16 — model gateway (this phase):** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
-17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
+16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
+17. **Phase 17 — document lifecycle (this phase):** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
 18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.

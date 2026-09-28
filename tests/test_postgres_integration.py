@@ -97,3 +97,71 @@ def test_acl_is_enforced_in_sql_before_top_k(store: PostgresPersistence, tenant:
     assert store.get_document(tenant, hr_id) is None
     assert store.delete_document(tenant, hr_id) is False
     assert store.delete_document(tenant, hr_id, ["hr"]) is True
+
+
+def test_reupload_supersedes_and_hides_the_old_version(
+    store: PostgresPersistence, tenant: str
+) -> None:
+    first = RagIngestionPipeline().ingest(b"Doors open at nine.", "hours.txt", tenant)
+    second = RagIngestionPipeline().ingest(b"Doors open at ten.", "hours.txt", tenant)
+    v1 = store.persist(first, vectors(1))
+    v2 = store.persist(second, vectors(1))
+    assert (v1.version, v2.version, v2.superseded) == (1, 2, (v1.document_id,))
+    rows = store.search_hybrid(tenant, "doors open", vectors(1)[0], limit=5)
+    assert [row["document_id"] for row in rows] == [v2.document_id]
+    restored = store.persist(first, vectors(1))
+    assert restored.already_existed and restored.version == 3
+    assert restored.superseded == (v2.document_id,)
+    assert len(store.list_documents(tenant, include_superseded=True)) == 2
+
+
+def test_job_queue_processes_retries_and_isolates_tenants(
+    store: PostgresPersistence, tenant: str
+) -> None:
+    from workers import PostgresJobQueue
+
+    attempts: list[str] = []
+
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        attempts.append(str(payload["kind"]))
+        if payload["kind"] == "bad-input":
+            raise ValueError("document has no text to index")
+        if payload["kind"] == "flaky" and attempts.count("flaky") == 1:
+            raise RuntimeError("embedding service hiccup")
+        return {"ok": payload["kind"]}
+
+    queue = PostgresJobQueue(store, handler, start=False)
+    good = queue.submit(tenant, {"kind": "good", "content_base64": "eA=="})
+    bad = queue.submit(tenant, {"kind": "bad-input"})
+    flaky = queue.submit(tenant, {"kind": "flaky"})
+    while queue.run_once():
+        pass
+    assert queue.get(tenant, good.id).as_dict()["result"] == {"ok": "good"}  # type: ignore[union-attr]
+    failed = queue.get(tenant, bad.id)
+    assert failed is not None and failed.status == "failed" and "no text" in (failed.error or "")
+    retrying = queue.get(tenant, flaky.id)
+    assert retrying is not None and retrying.status == "queued"  # backing off
+    assert queue.get(f"{tenant}-other", good.id) is None
+    assert queue.get(tenant, "not-a-uuid") is None
+
+    with store._connect() as connection, connection.cursor() as cursor:
+        store._set_tenant(cursor, tenant)
+        cursor.execute(
+            "SELECT payload ? 'content_base64' FROM ingestion_jobs WHERE id = %s", (good.id,)
+        )
+        assert cursor.fetchone()[0] is False  # uploaded bytes dropped after completion
+        # Simulate the backoff elapsing, then a crash mid-run on a second job.
+        cursor.execute("UPDATE ingestion_jobs SET run_after = now() WHERE id = %s", (flaky.id,))
+    assert queue.run_once()
+    assert queue.get(tenant, flaky.id).status == "completed"  # type: ignore[union-attr]
+
+    stuck = queue.submit(tenant, {"kind": "good"})
+    with store._connect() as connection, connection.cursor() as cursor:
+        store._set_tenant(cursor, tenant)
+        cursor.execute(
+            "UPDATE ingestion_jobs SET status = 'running', locked_at = now() - interval '1 hour' "
+            "WHERE id = %s",
+            (stuck.id,),
+        )
+    assert queue.run_once()
+    assert queue.get(tenant, stuck.id).status == "completed"  # type: ignore[union-attr]

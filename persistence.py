@@ -26,6 +26,8 @@ class PersistResult:
     document_id: str
     chunks_written: int
     already_existed: bool
+    version: int = 1
+    superseded: tuple[str, ...] = ()
 
 
 class PostgresPersistence:
@@ -70,11 +72,16 @@ class PostgresPersistence:
         embeddings: Sequence[Sequence[float]],
         model_name: str = MODEL_NAME,
         allowed_groups: Sequence[str] = (),
+        *,
+        groups: Sequence[str] = (),
+        content_type: str = "text/plain",
     ) -> PersistResult:
-        """Atomically upsert one ingestion result and its chunks.
+        """Atomically store one ingestion result as the current version of its source.
 
-        The method expects the ``IngestResult`` shape from ``rag.py``. A content
-        hash is unique per tenant, making retries and identical reuploads safe.
+        The content hash is unique per tenant, so retries and identical uploads
+        are idempotent. A new upload for an existing source becomes the next
+        version and supersedes the older ones the uploader can see (``groups``);
+        re-uploading a superseded version's exact bytes reinstates it.
         """
         chunks = tuple(result.chunks)
         if not chunks:
@@ -93,60 +100,85 @@ class PostgresPersistence:
             normalized_embeddings.append("[" + ",".join(map(str, vector)) + "]")
         first = chunks[0]
         tenant_id = first.tenant_id
-        source = first.source
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
+            # Serialize uploads of the same source so only one version is current.
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{tenant_id}/{first.source}",)
+            )
             cursor.execute(
                 """
                     INSERT INTO documents
                         (document_id, tenant_id, source, content_sha256, chunk_count,
-                         allowed_groups)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                         allowed_groups, content_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tenant_id, content_sha256) DO UPDATE
                         SET updated_at = now()
-                    RETURNING document_id, (xmax = 0) AS inserted
+                    RETURNING document_id, (xmax = 0) AS inserted, status, source, version
                     """,
                 (
                     result.document_id,
                     tenant_id,
-                    source,
+                    first.source,
                     result.content_sha256,
                     len(chunks),
                     list(allowed_groups),
+                    content_type,
                 ),
             )
-            document_id, inserted = cursor.fetchone()
-            if not inserted:
-                return PersistResult(document_id, 0, True)
-
-            cursor.executemany(
-                """
-                    INSERT INTO chunks
-                        (id, tenant_id, document_id, chunk_index, text, embedding,
-                         embedding_model, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s)
-                    ON CONFLICT (tenant_id, document_id, chunk_index) DO NOTHING
-                    """,
-                (
+            document_id, inserted, status, source, version = cursor.fetchone()
+            if not inserted and status == "ready":
+                return PersistResult(document_id, 0, True, version)
+            if inserted:
+                cursor.executemany(
+                    """
+                        INSERT INTO chunks
+                            (id, tenant_id, document_id, chunk_index, text, page, embedding,
+                             embedding_model, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s, %s)
+                        ON CONFLICT (tenant_id, document_id, chunk_index) DO NOTHING
+                        """,
                     (
-                        chunk.id,
-                        chunk.tenant_id,
-                        document_id,
-                        chunk.index,
-                        chunk.text,
-                        embedding,
-                        model_name,
-                        chunk.created_at,
-                    )
-                    for chunk, embedding in zip(chunks, normalized_embeddings, strict=True)
-                ),
-            )
+                        (
+                            chunk.id,
+                            chunk.tenant_id,
+                            document_id,
+                            chunk.index,
+                            chunk.text,
+                            getattr(chunk, "page", None),
+                            embedding,
+                            model_name,
+                            chunk.created_at,
+                        )
+                        for chunk, embedding in zip(chunks, normalized_embeddings, strict=True)
+                    ),
+                )
             cursor.execute(
-                "UPDATE documents SET chunk_count = %s, updated_at = now() "
-                "WHERE tenant_id = %s AND document_id = %s",
-                (len(chunks), tenant_id, document_id),
+                f"""
+                    UPDATE documents AS d SET status = 'superseded', updated_at = now()
+                    WHERE tenant_id = %s AND source = %s AND document_id <> %s
+                      AND status = 'ready' AND {ACL_FILTER}
+                    RETURNING document_id
+                    """,
+                (tenant_id, source, document_id, list(groups)),
             )
-        return PersistResult(document_id, len(chunks), False)
+            superseded = tuple(row[0] for row in cursor.fetchall())
+            cursor.execute(
+                f"""
+                    SELECT coalesce(max(version), 0) FROM documents AS d
+                    WHERE tenant_id = %s AND source = %s AND document_id <> %s AND {ACL_FILTER}
+                    """,
+                (tenant_id, source, document_id, list(groups)),
+            )
+            version = int(cursor.fetchone()[0]) + 1
+            cursor.execute(
+                "UPDATE documents SET status = 'ready', version = %s, updated_at = now() "
+                "WHERE tenant_id = %s AND document_id = %s",
+                (version, tenant_id, document_id),
+            )
+        return PersistResult(
+            document_id, len(chunks) if inserted else 0, not inserted, version, superseded
+        )
 
     def search_similar(
         self,
@@ -168,18 +200,17 @@ class PostgresPersistence:
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
             cursor.execute(
-                """
+                f"""
                     SELECT c.id, c.tenant_id, c.document_id, c.chunk_index, c.text,
-                           c.created_at, d.source, d.allowed_groups,
+                           c.created_at, c.page, d.source, d.allowed_groups,
                            1 - (c.embedding <=> %s::vector) AS score
                     FROM chunks AS c
                     JOIN documents AS d USING (tenant_id, document_id)
                     WHERE c.tenant_id = %s
                       AND c.embedding IS NOT NULL
                       AND c.embedding_model = %s
-                      AND """
-                + ACL_FILTER
-                + """
+                      AND d.status = 'ready'
+                      AND {ACL_FILTER}
                     ORDER BY c.embedding <=> %s::vector
                     LIMIT %s
                     """,
@@ -220,7 +251,7 @@ class PostgresPersistence:
             self._set_tenant(cursor, tenant_id)
             columns = (
                 "c.id, c.tenant_id, c.document_id, c.chunk_index, c.text, "
-                "c.created_at, d.source, d.allowed_groups"
+                "c.created_at, c.page, d.source, d.allowed_groups"
             )
             cursor.execute(
                 f"""
@@ -229,6 +260,7 @@ class PostgresPersistence:
                 JOIN documents AS d USING (tenant_id, document_id)
                 WHERE c.tenant_id = %s AND c.embedding IS NOT NULL
                   AND c.embedding_model = %s
+                  AND d.status = 'ready'
                   AND {ACL_FILTER}
                 ORDER BY c.embedding <=> %s::vector
                 LIMIT %s
@@ -252,6 +284,7 @@ class PostgresPersistence:
                 JOIN documents AS d USING (tenant_id, document_id)
                 WHERE c.tenant_id = %s
                   AND c.search_vector @@ plainto_tsquery('english', %s)
+                  AND d.status = 'ready'
                   AND {ACL_FILTER}
                 ORDER BY keyword_score DESC, c.chunk_index
                 LIMIT %s
@@ -330,8 +363,8 @@ class PostgresPersistence:
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     DOCUMENT_COLUMNS = (
-        "document_id, source, content_sha256, status, chunk_count, allowed_groups, "
-        "created_at, updated_at"
+        "document_id, source, version, status, content_type, content_sha256, chunk_count, "
+        "allowed_groups, created_at, updated_at"
     )
 
     def _select_documents(
@@ -350,9 +383,12 @@ class PostgresPersistence:
             columns = [column.name for column in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
-    def list_documents(self, tenant_id: str, groups: Sequence[str] = ()) -> list[dict[str, Any]]:
+    def list_documents(
+        self, tenant_id: str, groups: Sequence[str] = (), *, include_superseded: bool = False
+    ) -> list[dict[str, Any]]:
         """Return the caller-visible document metadata, newest first."""
-        return self._select_documents(tenant_id, groups, "", ())
+        where = "" if include_superseded else "AND status = 'ready'"
+        return self._select_documents(tenant_id, groups, where, ())
 
     def get_document(
         self, tenant_id: str, document_id: str, groups: Sequence[str] = ()

@@ -43,6 +43,7 @@ class FakePersistence:
         embeddings: list[list[float]],
         model_name: str,
         allowed_groups: tuple[str, ...] = (),
+        **options: object,
     ) -> object:
         self.persist_calls += 1
         ingested = result
@@ -63,6 +64,8 @@ class FakePersistence:
             document_id=ingested.document_id,
             chunks_written=len(embeddings),
             already_existed=False,
+            version=1,
+            superseded=(),
         )
 
     def search_similar(
@@ -108,7 +111,9 @@ def _call(
 
 def test_vector_api_ingests_and_queries_through_persistence() -> None:
     persistence = FakePersistence()
-    app = RagApiApplication(keys=KEYS, persistence=persistence, embedder=FakeEmbedder())
+    app = RagApiApplication(
+        keys=KEYS, persistence=persistence, embedder=FakeEmbedder(), run_worker=False
+    )
 
     status, ingest = _call(
         app,
@@ -150,7 +155,9 @@ def test_injection_query_is_rejected_before_embedding() -> None:
         def embed_query(self, text: str) -> list[float]:
             raise AssertionError("invalid query reached the embedding model")
 
-    app = RagApiApplication(keys=KEYS, persistence=FakePersistence(), embedder=ShouldNotEmbed())
+    app = RagApiApplication(
+        keys=KEYS, persistence=FakePersistence(), embedder=ShouldNotEmbed(), run_worker=False
+    )
     status, _ = _call(
         app,
         "POST",

@@ -2,31 +2,34 @@
 
 The server uses only Python's standard library so the request lifecycle stays
 visible: a small route table maps (method, path) to one handler method each.
-Request bodies are JSON; uploaded document content is a UTF-8 string.
+Request bodies are JSON; documents arrive as text or as base64-encoded files.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
 import re
-import threading
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from auth import ApiKeyStore
 from embeddings import Embedder, LocalFastEmbedder
 from gateway import configured_provider
 from history import ChatHistoryStore
-from permissions import Principal, can_read, can_read_groups, normalize_groups
+from memory_store import InMemoryStore
+from parsers import parse
+from permissions import Principal, can_read, normalize_groups
 from persistence import PostgresPersistence
 from providers import (
     ABSTENTION,
@@ -39,7 +42,7 @@ from providers import (
 from query import RagQueryPipeline, UnsafeQueryError
 from rag import RagIngestionPipeline
 from reranker import CrossEncoderReranker
-from workers import IngestionWorker
+from workers import IngestionWorker, PostgresJobQueue
 
 
 class ApiError(Exception):
@@ -57,6 +60,7 @@ class Request:
     payload: dict[str, Any]
     request_id: str
     principal: Principal | None = None
+    query: dict[str, str] = field(default_factory=dict)
 
     @property
     def caller(self) -> Principal:
@@ -92,6 +96,7 @@ class RagApiApplication:
         keys: ApiKeyStore | None = None,
         min_score: float | None = None,
         relative_score: float | None = None,
+        run_worker: bool | None = None,
     ) -> None:
         # Identity is server-side: each key maps to one tenant, user and groups.
         # api_key/tenant_id are a shorthand for a single-key deployment.
@@ -119,11 +124,16 @@ class RagApiApplication:
         self.provider = provider or configured_provider()
         self.reranker = reranker or CrossEncoderReranker()
         self.history = ChatHistoryStore()
-        # In-memory fallback: chunks plus one metadata record per document.
-        self._chunks: list[Any] = []
-        self._documents: dict[tuple[str, str], dict[str, Any]] = {}
-        self._lock = threading.Lock()
-        self.worker = IngestionWorker(self._ingest_document)
+        self.memory = InMemoryStore()
+        # Durable queue with a database; in-process worker for the demo.
+        # RAG_RUN_WORKER=0 serves the API without consuming jobs.
+        if run_worker is None:
+            run_worker = os.getenv("RAG_RUN_WORKER", "1") != "0"
+        self.worker: IngestionWorker | PostgresJobQueue = (
+            PostgresJobQueue(persistence, self._ingest_document, start=run_worker)
+            if persistence is not None
+            else IngestionWorker(self._ingest_document)
+        )
         # (method, path pattern, handler, requires authentication)
         self.routes: list[tuple[str, re.Pattern[str], Handler, bool]] = [
             ("GET", re.compile(r"/health/live"), self._live, False),
@@ -179,7 +189,9 @@ class RagApiApplication:
     ) -> tuple[int, dict[str, Any]]:
         lowered = {key.lower(): value for key, value in headers.items()}
         request_id = lowered.get("x-request-id") or str(uuid4())
-        route_path = urlsplit(path).path.rstrip("/") or "/"
+        url = urlsplit(path)
+        route_path = url.path.rstrip("/") or "/"
+        query = {key: values[-1] for key, values in parse_qs(url.query).items()}
         allowed: list[str] = []
         for route_method, pattern, handler, requires_auth in self.routes:
             match = pattern.fullmatch(route_path)
@@ -198,6 +210,7 @@ class RagApiApplication:
                 self._json_body(body),
                 request_id,
                 principal,
+                query,
             )
             status, payload = handler(request)
             return status, {**payload, "request_id": request_id}
@@ -220,61 +233,69 @@ class RagApiApplication:
 
     # -- documents --------------------------------------------------------
 
-    @staticmethod
-    def _document_job(request: Request) -> dict[str, Any]:
-        """Validate an upload and bind it to the caller's tenant."""
+    def _document_job(self, request: Request) -> dict[str, Any]:
+        """Validate an upload and bind it to the caller's identity.
+
+        Send text as ``content``, or any supported file as ``content_base64``
+        with an optional ``content_type``.
+        """
         payload = request.payload
         filename = payload.get("filename")
-        content = payload.get("content")
-        if not isinstance(filename, str) or not isinstance(content, str):
-            raise ValueError("filename and content are required strings")
+        if not isinstance(filename, str) or not filename.strip():
+            raise ValueError("filename is required")
+        content, encoded = payload.get("content"), payload.get("content_base64")
+        if isinstance(content, str) and encoded is None:
+            encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        elif not isinstance(encoded, str) or content is not None:
+            raise ValueError("send exactly one of content (text) or content_base64 (file)")
+        else:
+            try:
+                base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("content_base64 is not valid base64") from exc
+        content_type = payload.get("content_type")
+        if content_type is not None and not isinstance(content_type, str):
+            raise ValueError("content_type must be a string")
+        principal = request.caller
         return {
-            "tenant_id": RagApiApplication._tenant(request),
+            "tenant_id": self._tenant(request),
             "filename": filename,
-            "content": content,
+            "content_base64": encoded,
+            "content_type": content_type,
             "allowed_groups": list(normalize_groups(payload.get("allowed_groups"))),
+            # The uploader's groups decide which older versions it may supersede.
+            "groups": sorted(principal.groups),
         }
 
     def _ingest_document(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Ingest a validated job from _document_job; runs inline or on the worker."""
-        tenant_id = job["tenant_id"]
-        allowed_groups = tuple(job["allowed_groups"])
-        result = self.ingestion.ingest(job["content"].encode("utf-8"), job["filename"], tenant_id)
+        """Parse, chunk, embed and store one validated job; runs inline or on a worker."""
+        data = base64.b64decode(job["content_base64"])
+        parsed = parse(data, job["filename"], job.get("content_type"))
+        result = self.ingestion.ingest_segments(
+            data, parsed.segments, job["filename"], job["tenant_id"]
+        )
         if not result.chunks:
             raise ValueError("document has no text to index")
+        options = {
+            "groups": job.get("groups", []),
+            "content_type": parsed.content_type,
+        }
         if self.persistence is not None:
             assert self.embedder is not None
             embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
             stored = self.persistence.persist(
-                result, embeddings, self.embedder.model_name, allowed_groups
+                result, embeddings, self.embedder.model_name, job["allowed_groups"], **options
             )
-            document_id = stored.document_id
-            chunks_created = stored.chunks_written
-            already_existed = stored.already_existed
         else:
-            key = (tenant_id, result.document_id)
-            with self._lock:
-                already_existed = key in self._documents
-                if not already_existed:
-                    now = datetime.now(UTC)
-                    self._documents[key] = {
-                        "document_id": result.document_id,
-                        "source": result.chunks[0].source,
-                        "content_sha256": result.content_sha256,
-                        "status": "ready",
-                        "chunk_count": len(result.chunks),
-                        "allowed_groups": list(allowed_groups),
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                    self._chunks.extend(result.chunks)
-            document_id = result.document_id
-            chunks_created = 0 if already_existed else len(result.chunks)
+            stored = self.memory.persist(result, job["allowed_groups"], **options)
         return {
-            "document_id": document_id,
+            "document_id": stored.document_id,
             "content_sha256": result.content_sha256,
-            "chunks_created": chunks_created,
-            "already_existed": already_existed,
+            "content_type": parsed.content_type,
+            "version": stored.version,
+            "superseded": list(stored.superseded),
+            "chunks_created": stored.chunks_written,
+            "already_existed": stored.already_existed,
         }
 
     def _create_document(self, request: Request) -> tuple[int, dict[str, Any]]:
@@ -285,64 +306,36 @@ class RagApiApplication:
         status = HTTPStatus.OK if stored["already_existed"] else HTTPStatus.CREATED
         return status, stored
 
-    def _visible_documents(self, principal: Principal) -> list[dict[str, Any]]:
-        """In-memory documents this principal may read (caller holds no lock)."""
-        with self._lock:
-            return [
-                dict(meta)
-                for (owner, _), meta in self._documents.items()
-                if owner == principal.tenant_id
-                and can_read_groups(meta["allowed_groups"], principal)
-            ]
+    @property
+    def store(self) -> PostgresPersistence | InMemoryStore:
+        return self.persistence if self.persistence is not None else self.memory
 
     def _list_documents(self, request: Request) -> tuple[int, dict[str, Any]]:
         principal = request.caller
         self._tenant(request)
-        if self.persistence is not None:
-            rows = self.persistence.list_documents(principal.tenant_id, sorted(principal.groups))
-        else:
-            rows = self._visible_documents(principal)
-            rows.sort(key=lambda row: (row["created_at"], row["document_id"]), reverse=True)
+        include_superseded = request.query.get("include_superseded") == "true"
+        rows = self.store.list_documents(
+            principal.tenant_id, sorted(principal.groups), include_superseded=include_superseded
+        )
         documents = [{key: _iso(value) for key, value in row.items()} for row in rows]
         return HTTPStatus.OK, {"documents": documents}
 
     def _get_document(self, request: Request) -> tuple[int, dict[str, Any]]:
         principal = request.caller
         self._tenant(request)
-        document_id = request.params["document_id"]
-        if self.persistence is not None:
-            row = self.persistence.get_document(
-                principal.tenant_id, document_id, sorted(principal.groups)
-            )
-        else:
-            row = next(
-                (r for r in self._visible_documents(principal) if r["document_id"] == document_id),
-                None,
-            )
+        row = self.store.get_document(
+            principal.tenant_id, request.params["document_id"], sorted(principal.groups)
+        )
         if row is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
         return HTTPStatus.OK, {key: _iso(value) for key, value in row.items()}
 
     def _delete_document(self, request: Request) -> tuple[int, dict[str, Any]]:
         principal = request.caller
-        tenant_id = self._tenant(request)
         document_id = request.params["document_id"]
-        if self.persistence is not None:
-            deleted = self.persistence.delete_document(
-                tenant_id, document_id, sorted(principal.groups)
-            )
-        else:
-            with self._lock:
-                meta = self._documents.get((tenant_id, document_id))
-                deleted = meta is not None and can_read_groups(meta["allowed_groups"], principal)
-                if not deleted:
-                    raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
-                del self._documents[(tenant_id, document_id)]
-                self._chunks = [
-                    chunk
-                    for chunk in self._chunks
-                    if not (chunk.tenant_id == tenant_id and chunk.document_id == document_id)
-                ]
+        deleted = self.store.delete_document(
+            self._tenant(request), document_id, sorted(principal.groups)
+        )
         if not deleted:
             raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
         return HTTPStatus.OK, {"document_id": document_id, "deleted": True}
@@ -383,9 +376,7 @@ class RagApiApplication:
         gate = self.min_score if gated else 0.0
         relative = self.relative_score if gated else 0.0
         if self.persistence is None:
-            readable = {row["document_id"] for row in self._visible_documents(principal)}
-            with self._lock:
-                chunks = tuple(c for c in self._chunks if c.document_id in readable)
+            chunks = self.memory.readable_chunks(principal)
             return RagQueryPipeline(chunks, min_score=gate, relative_score=relative).evidence(
                 question, tenant_id
             )
@@ -412,6 +403,7 @@ class RagApiApplication:
                     index=row["chunk_index"],
                     text=row["text"],
                     source=row["source"],
+                    page=row.get("page"),
                 ),
                 float(row["score"]),
             )
@@ -462,6 +454,7 @@ class RagApiApplication:
                     "document_id": chunk.document_id,
                     "source": chunk.source,
                     "chunk_index": chunk.index,
+                    "page": getattr(chunk, "page", None),
                     "score": round(score, 4),
                     "excerpt": chunk.text[:240],
                 }
