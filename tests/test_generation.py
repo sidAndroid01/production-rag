@@ -164,3 +164,21 @@ def test_reranker_scores_are_probabilities() -> None:
     fallback._unavailable = True
     scored = fallback.rerank("refund days", [{"text": "refund days", "score": 1.0}])
     assert scored[0]["score"] == pytest.approx(1.0)
+
+
+def test_standalone_chat_questions_are_not_rewritten() -> None:
+    from providers import heuristic_rewrite
+
+    history = [ChatTurn("user", "How long do I have to return something?")]
+    assert heuristic_rewrite("Do you sell electric bicycles?", history) == (
+        "Do you sell electric bicycles?"
+    )
+    assert heuristic_rewrite("And for express orders?", history).startswith("How long")
+    assert heuristic_rewrite("Is it free?", history).startswith("How long")
+
+
+def test_off_topic_chat_question_still_abstains() -> None:
+    app = make_app(ExtractiveProvider())
+    ask(app, "/v1/chat", session_id="s", question="How are contractors paid?")
+    body = ask(app, "/v1/chat", session_id="s", question="Do you sell electric bicycles?")
+    assert body["grounded"] is False and "search_query" not in body

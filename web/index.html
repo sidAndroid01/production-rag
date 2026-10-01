@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Console</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/favicon.svg" alt="" width="22" height="22">
+      <span>RAG Console</span>
+    </div>
+    <form id="key-form" class="key-form" autocomplete="off">
+      <label for="api-key" class="visually-hidden">API key</label>
+      <input id="api-key" type="password" placeholder="API key" spellcheck="false">
+      <button type="submit">Connect</button>
+    </form>
+    <div id="identity" class="identity" aria-live="polite">Not connected</div>
+  </header>
+
+  <main class="layout">
+    <section class="panel documents" aria-labelledby="docs-title">
+      <div class="panel-head">
+        <h2 id="docs-title">Documents</h2>
+        <label class="toggle"><input id="show-old" type="checkbox"> Show old versions</label>
+      </div>
+
+      <form id="upload-form" class="upload">
+        <div id="drop" class="drop" tabindex="0">
+          <input id="file" type="file" accept=".txt,.md,.markdown,.html,.htm,.pdf,text/plain,text/markdown,text/html,application/pdf">
+          <p><strong>Drop a file</strong> or click to choose</p>
+          <p class="hint">PDF, HTML, Markdown or text · up to 3.5 MB</p>
+          <p id="file-name" class="file-name"></p>
+        </div>
+        <details>
+          <summary>…or paste text</summary>
+          <input id="paste-name" type="text" placeholder="filename, e.g. notes.md">
+          <textarea id="paste-text" rows="4" placeholder="Document text"></textarea>
+        </details>
+        <div class="row">
+          <input id="groups" type="text" placeholder="Restrict to groups (optional, comma-separated)">
+        </div>
+        <div class="row between">
+          <label class="toggle"><input id="as-job" type="checkbox"> Ingest in background</label>
+          <button id="upload-btn" type="submit" disabled>Upload</button>
+        </div>
+        <p id="upload-status" class="status" aria-live="polite"></p>
+      </form>
+
+      <ul id="doc-list" class="doc-list" aria-live="polite"></ul>
+      <p id="doc-empty" class="empty">No documents yet.</p>
+    </section>
+
+    <section class="panel chat" aria-labelledby="chat-title">
+      <div class="panel-head">
+        <h2 id="chat-title">Ask</h2>
+        <div class="mode" role="radiogroup" aria-label="Mode">
+          <label><input type="radio" name="mode" value="chat" checked> Chat</label>
+          <label><input type="radio" name="mode" value="query"> Single question</label>
+        </div>
+        <button id="new-chat" class="ghost" type="button">New chat</button>
+      </div>
+
+      <div id="messages" class="messages" aria-live="polite">
+        <div class="welcome">
+          <p>Upload a document, then ask about it.</p>
+          <p class="hint">Answers cite their sources as <span class="cite-chip">1</span>. Click one to see the passage.</p>
+        </div>
+      </div>
+
+      <form id="ask-form" class="ask">
+        <label for="question" class="visually-hidden">Question</label>
+        <textarea id="question" rows="2" placeholder="Ask a question about your documents…"></textarea>
+        <button id="ask-btn" type="submit" disabled>Send</button>
+      </form>
+    </section>
+  </main>
+
+  <template id="tpl-doc">
+    <li class="doc">
+      <div class="doc-main">
+        <span class="doc-name"></span>
+        <span class="doc-meta"></span>
+      </div>
+      <button class="ghost danger doc-delete" type="button">Delete</button>
+    </li>
+  </template>
+</body>
+</html>

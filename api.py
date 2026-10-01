@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -161,6 +162,7 @@ class RagApiApplication:
         self.routes: list[tuple[str, re.Pattern[str], Handler, bool]] = [
             ("GET", re.compile(r"/health/live"), self._live, False),
             ("GET", re.compile(r"/health/ready"), self._ready, False),
+            ("GET", re.compile(r"/v1/me"), self._me, True),
             ("GET", re.compile(r"/v1/documents"), self._list_documents, True),
             ("POST", re.compile(r"/v1/documents"), self._create_document, True),
             ("GET", re.compile(r"/v1/documents/(?P<document_id>[^/]+)"), self._get_document, True),
@@ -329,6 +331,17 @@ class RagApiApplication:
             except Exception as exc:
                 raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "database is unavailable") from exc
         return HTTPStatus.OK, {"status": "ready"}
+
+    def _me(self, request: Request) -> tuple[int, dict[str, Any]]:
+        """Who the presented key belongs to, and which backend answers; used by the UI."""
+        principal = request.caller
+        return HTTPStatus.OK, {
+            "tenant_id": principal.tenant_id,
+            "user_id": principal.user_id,
+            "groups": sorted(principal.groups),
+            "storage": "postgres" if self.persistence is not None else "memory",
+            "model": getattr(self.provider, "name", "provider"),
+        }
 
     # -- documents --------------------------------------------------------
 
@@ -639,6 +652,15 @@ class RagApiApplication:
         return HTTPStatus.OK, response
 
 
+WEB_ROOT = (Path(__file__).parent / "web").resolve()
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     # Assigned by run() or tests; building it at import would start threads
     # and load models as a side effect of importing this module.
@@ -674,10 +696,34 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self) -> None:
-        if urlsplit(self.path).path == "/metrics":
+        path = urlsplit(self.path).path
+        if path == "/metrics":
             self._metrics()
+        elif path == "/" or path.startswith("/static/"):
+            self._static(path)
         else:
             self._dispatch()
+
+    def _static(self, path: str) -> None:
+        """Serve the test UI from web/. Only known files; no directory traversal."""
+        name = "index.html" if path == "/" else path.removeprefix("/static/")
+        file = (WEB_ROOT / name).resolve()
+        content_type = STATIC_TYPES.get(file.suffix)
+        if file.parent != WEB_ROOT or content_type is None or not file.is_file():
+            self._respond(HTTPStatus.NOT_FOUND, {"detail": "not found"})
+            return
+        encoded = file.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(encoded)))
+        # Same-origin scripts and API calls only; the page loads nothing external.
+        self.send_header(
+            "content-security-policy",
+            "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'",
+        )
+        self._common_headers()
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def do_POST(self) -> None:
         self._dispatch()

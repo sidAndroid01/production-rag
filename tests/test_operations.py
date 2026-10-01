@@ -170,3 +170,20 @@ def test_chat_history_survives_a_new_process() -> None:
     assert second.get(f"{tenant}-other", "u", session) == ()
     second.clear(tenant, "u", session)
     assert second.get(tenant, "u", session) == ()
+
+
+def test_ui_is_served_with_a_strict_content_security_policy(server: str) -> None:
+    status, headers, body = fetch(server + "/")
+    assert status == 200 and b"RAG Console" in body
+    assert "default-src 'self'" in headers["content-security-policy"]
+    for asset, kind in (("app.js", "javascript"), ("styles.css", "css"), ("favicon.svg", "svg")):
+        status, headers, _ = fetch(f"{server}/static/{asset}")
+        assert status == 200 and kind in headers["content-type"]
+    for probe in ("/static/../api.py", "/static/%2e%2e/api.py", "/static/nope.js", "/static/"):
+        assert fetch(server + probe)[0] == 404
+
+
+def test_me_reports_the_callers_identity() -> None:
+    app = RagApiApplication(api_key="k", tenant_id="acme")
+    _, me = app.handle("GET", "/v1/me", HEADERS)
+    assert (me["tenant_id"], me["storage"]) == ("acme", "memory")

@@ -20,6 +20,7 @@ RUN python -c "from embeddings import LocalFastEmbedder; LocalFastEmbedder().emb
 COPY *.py ./
 COPY migrations ./migrations
 COPY evals ./evals
+COPY web ./web
 
 RUN useradd --create-home --uid 10001 appuser
 USER appuser

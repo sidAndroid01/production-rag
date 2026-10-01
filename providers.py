@@ -86,10 +86,27 @@ def strip_invalid_citations(answer: str, source_count: int) -> str:
     return CITATION_RE.sub(keep_valid, answer).strip()
 
 
+FOLLOW_UP_RE = re.compile(
+    r"^\s*(and|also|what about|how about)\b|\b(it|its|that|those|them|they|their|this|these)\b",
+    re.I,
+)
+
+
+def looks_like_follow_up(question: str) -> bool:
+    """Very short questions, or ones leaning on pronouns, depend on earlier turns."""
+    return len(question.split()) <= 3 or bool(FOLLOW_UP_RE.search(question))
+
+
 def heuristic_rewrite(question: str, history: Sequence[ChatTurn]) -> str:
-    """Model-free follow-up handling: carry the previous user question as context."""
+    """Model-free follow-up handling: carry the previous user question as context.
+
+    Standalone questions are left alone; prefixing every question with the last
+    one would let an off-topic question borrow evidence and skip abstention.
+    """
     previous = next((turn.content for turn in reversed(history) if turn.role == "user"), None)
-    return f"{previous} {question}" if previous else question
+    if previous and looks_like_follow_up(question):
+        return f"{previous} {question}"
+    return question
 
 
 class ModelProvider:
