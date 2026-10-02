@@ -2,6 +2,10 @@
 
 A multi-tenant retrieval-augmented generation API, built in visible phases so every production concern is added, explained, and tested one at a time. It runs on PostgreSQL + pgvector with local embeddings, hybrid retrieval, row-level tenant security, group ACLs, grounded and cited answers, a resilient model gateway, versioned PDF/HTML/Markdown documents, a durable job queue, an evaluation gate in CI, and structured logs and metrics.
 
+![RAG Console: a chat answered by a local llama3 model, with each claim linked to its cited source passage](docs/assets/rag-console.jpg)
+
+*The built-in console at `http://localhost:8000`, running the full Docker stack (PostgreSQL + pgvector) with a local Ollama `llama3` model. Answers cite their sources; the follow-up question was rewritten into a standalone search ("searched: …"), and each answer shows its model, tokens, latency, and request ID.*
+
 ## Quick start
 
 ```bash
