@@ -340,7 +340,12 @@ class RagApiApplication:
             "user_id": principal.user_id,
             "groups": sorted(principal.groups),
             "storage": "postgres" if self.persistence is not None else "memory",
-            "model": getattr(self.provider, "name", "provider"),
+            # Name the actual models behind the gateway, e.g. "llama3 → extractive".
+            "model": " → ".join(
+                [p.name for p in getattr(self.provider, "providers", [])] + ["extractive"]
+            )
+            if hasattr(self.provider, "providers")
+            else getattr(self.provider, "name", "provider"),
         }
 
     # -- documents --------------------------------------------------------
