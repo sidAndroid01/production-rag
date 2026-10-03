@@ -3,12 +3,14 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const MAX_FILE_BYTES = 3_500_000; // base64 adds ~33%; the API accepts 5 MB bodies.
+const BACKGROUND_ABOVE_BYTES = 2_000_000;
 const state = {
   key: sessionStorage.getItem("rag-key") || "",
   session: crypto.randomUUID(),
   connected: false,
   file: null,
+  maxFileBytes: 18_000_000, // replaced by the server's limit on connect
+
 };
 
 class ApiError extends Error {
@@ -59,6 +61,8 @@ async function connect() {
   try {
     const me = await api("GET", "/v1/me");
     state.connected = true;
+    state.maxFileBytes = me.max_file_bytes || state.maxFileBytes;
+    $("upload-limit").textContent = formatBytes(state.maxFileBytes);
     identity.replaceChildren(
       "Tenant ", el("strong", "", me.tenant_id),
       " · user ", el("strong", "", me.user_id),
@@ -74,10 +78,19 @@ async function connect() {
   updateButtons();
 }
 
+function formatBytes(bytes) {
+  return `${Math.floor(bytes / 1_000_000)} MB`;
+}
+
 function updateButtons() {
-  const pasted = $("paste-text").value.trim() && $("paste-name").value.trim();
-  $("upload-btn").disabled = !state.connected || !(state.file || pasted);
+  const hasContent = Boolean(state.file || $("paste-text").value.trim());
+  $("upload-btn").disabled = !state.connected || !hasContent;
   $("ask-btn").disabled = !state.connected || !$("question").value.trim();
+  // Say why Upload is unavailable instead of leaving a silently disabled button.
+  const hint = $("upload-hint");
+  if (!state.connected) hint.textContent = "Connect with your API key first.";
+  else if (!hasContent) hint.textContent = "Choose a file or paste some text.";
+  else hint.textContent = "";
 }
 
 // ---------------------------------------------------------------- documents
@@ -134,9 +147,14 @@ function readAsBase64(file) {
 }
 
 function chooseFile(file) {
-  if (file && file.size > MAX_FILE_BYTES) {
-    setUploadStatus(`${file.name} is larger than 3.5 MB.`, "error");
+  if (file && file.size > state.maxFileBytes) {
+    setUploadStatus(
+      `${file.name} is ${formatBytes(file.size)}; the limit is ${formatBytes(state.maxFileBytes)}.`,
+      "error",
+    );
     file = null;
+  } else if (file) {
+    setUploadStatus("");
   }
   state.file = file || null;
   $("file-name").textContent = state.file ? state.file.name : "";
@@ -151,12 +169,18 @@ async function upload(event) {
     payload = { filename: state.file.name, content_base64: await readAsBase64(state.file) };
     if (state.file.type) payload.content_type = state.file.type;
   } else {
-    payload = { filename: $("paste-name").value.trim(), content: $("paste-text").value };
+    // A pasted note without a name still uploads; the name only labels it.
+    payload = { filename: $("paste-name").value.trim() || "pasted-text.txt", content: $("paste-text").value };
   }
   if (groups.length) payload.allowed_groups = groups;
-  const background = $("as-job").checked;
+  // Large files can take minutes to embed; queue them so the page stays responsive.
+  const large = Boolean(state.file && state.file.size > BACKGROUND_ABOVE_BYTES);
+  const background = $("as-job").checked || large;
   $("upload-btn").disabled = true;
-  setUploadStatus(background ? "Queuing…" : "Uploading and indexing…");
+  setUploadStatus(
+    large ? "Large file: uploading, then indexing in the background…"
+      : background ? "Queuing…" : "Uploading and indexing…",
+  );
   try {
     if (background) {
       const job = await api("POST", "/v1/ingestion/jobs", payload);
@@ -187,11 +211,11 @@ function reportStored(name, result) {
 }
 
 async function followJob(jobId, name) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  for (let attempt = 0; attempt < 900; attempt += 1) {
     const job = await api("GET", `/v1/ingestion/jobs/${jobId}`);
     if (job.status === "completed") return reportStored(name, job.result);
     if (job.status === "failed") throw new ApiError(422, job.error || "ingestion failed", job._requestId);
-    setUploadStatus(`Background job ${job.status}…`);
+    setUploadStatus(`Indexing ${name} in the background (${job.status}, ${attempt + 1} s)…`);
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   setUploadStatus("Still processing; refresh the list later.");
@@ -325,10 +349,20 @@ function init() {
       $("ask-form").requestSubmit();
     }
   });
+  // Handle drops ourselves; a file dropped anywhere else must not make the
+  // browser navigate away to display it.
   const drop = $("drop");
+  for (const type of ["dragover", "drop"]) {
+    window.addEventListener(type, (event) => event.preventDefault());
+  }
   drop.addEventListener("dragover", () => drop.classList.add("over"));
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (event) => {
+    drop.classList.remove("over");
+    const [file] = event.dataTransfer.files;
+    if (file) chooseFile(file);
+  });
+  updateButtons();
   if (state.key) connect();
 }
 

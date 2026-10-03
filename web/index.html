@@ -33,12 +33,12 @@
         <div id="drop" class="drop" tabindex="0">
           <input id="file" type="file" accept=".txt,.md,.markdown,.html,.htm,.pdf,text/plain,text/markdown,text/html,application/pdf">
           <p><strong>Drop a file</strong> or click to choose</p>
-          <p class="hint">PDF, HTML, Markdown or text · up to 3.5 MB</p>
+          <p class="hint">PDF, HTML, Markdown or text · up to <span id="upload-limit">18 MB</span></p>
           <p id="file-name" class="file-name"></p>
         </div>
         <details>
           <summary>…or paste text</summary>
-          <input id="paste-name" type="text" placeholder="filename, e.g. notes.md">
+          <input id="paste-name" type="text" placeholder="filename (optional), e.g. notes.md">
           <textarea id="paste-text" rows="4" placeholder="Document text"></textarea>
         </details>
         <div class="row">
@@ -48,6 +48,7 @@
           <label class="toggle"><input id="as-job" type="checkbox"> Ingest in background</label>
           <button id="upload-btn" type="submit" disabled>Upload</button>
         </div>
+        <p id="upload-hint" class="hint"></p>
         <p id="upload-status" class="status" aria-live="polite"></p>
       </form>
 

@@ -187,3 +187,13 @@ def test_me_reports_the_callers_identity() -> None:
     app = RagApiApplication(api_key="k", tenant_id="acme")
     _, me = app.handle("GET", "/v1/me", HEADERS)
     assert (me["tenant_id"], me["storage"]) == ("acme", "memory")
+
+
+def test_upload_limit_is_configurable_and_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAG_MAX_BODY_MB", "2")
+    app = RagApiApplication(api_key="k")
+    assert app.max_body_bytes == 2_000_000
+    _, me = app.handle("GET", "/v1/me", HEADERS)
+    assert me["max_file_bytes"] == 1_480_000
+    monkeypatch.delenv("RAG_MAX_BODY_MB")
+    assert RagApiApplication(api_key="k").max_body_bytes == 25_000_000

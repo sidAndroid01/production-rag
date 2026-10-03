@@ -99,7 +99,7 @@ class RagApiApplication:
     def __init__(
         self,
         api_key: str | None = None,
-        max_body_bytes: int = 5_000_000,
+        max_body_bytes: int | None = None,
         persistence: PostgresPersistence | None = None,
         embedder: Embedder | None = None,
         tenant_id: str | None = None,
@@ -131,6 +131,9 @@ class RagApiApplication:
         if relative_score is None:
             relative_score = float(os.getenv("RAG_RELATIVE_SCORE", RELATIVE_SCORE))
         self.relative_score = relative_score
+        # Uploads travel as base64 JSON, so a file can be ~3/4 of this size.
+        if max_body_bytes is None:
+            max_body_bytes = int(float(os.getenv("RAG_MAX_BODY_MB", "25")) * 1_000_000)
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
@@ -215,7 +218,7 @@ class RagApiApplication:
         """Route one request; log it once and record its metrics, whatever happens."""
         lowered = {key.lower(): value for key, value in headers.items()}
         request_id = lowered.get("x-request-id") or str(uuid4())
-        context: dict[str, Any] = {"route": "unmatched", "principal": None}
+        context: dict[str, Any] = {"route": "unmatched", "principal": None, "detail": None}
         started = time.perf_counter()
         status = int(HTTPStatus.INTERNAL_SERVER_ERROR)
         try:
@@ -224,6 +227,8 @@ class RagApiApplication:
         except ApiError as exc:
             status = int(exc.status)
             exc.request_id = request_id
+            # Record why a request was refused, so a user's report can be explained.
+            context["detail"] = exc.message
             if status == HTTPStatus.UNAUTHORIZED:
                 audit_logger.warning("auth.failed", extra={"request_id": request_id})
             raise
@@ -253,6 +258,7 @@ class RagApiApplication:
                     "method": method,
                     "route": route,
                     "status": status,
+                    "detail": context["detail"],
                     "duration_ms": round(elapsed * 1000, 2),
                     "tenant_id": principal.tenant_id if principal else None,
                     "user_id": principal.user_id if principal else None,
@@ -340,6 +346,8 @@ class RagApiApplication:
             "user_id": principal.user_id,
             "groups": sorted(principal.groups),
             "storage": "postgres" if self.persistence is not None else "memory",
+            # Largest file the UI can send once base64 and JSON overhead are added.
+            "max_file_bytes": int(self.max_body_bytes * 0.74),
             # Name the actual models behind the gateway, e.g. "llama3 → extractive".
             "model": " → ".join(
                 [p.name for p in getattr(self.provider, "providers", [])] + ["extractive"]
