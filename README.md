@@ -22,8 +22,9 @@ Without Docker, `make install && make run` starts the in-memory demo; `make chec
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/documents` | upload `content` (text) or `content_base64` (PDF/HTML/Markdown/text); optional `allowed_groups` |
+| `POST /v1/documents` | upload `content` (text) or `content_base64` (PDF/HTML/Markdown/text); optional `allowed_groups`, `source_id`, `source_version` |
 | `GET /v1/documents[?include_superseded=true]`, `GET` / `DELETE /v1/documents/{id}` | list, inspect, delete |
+| `PATCH /v1/documents/{id}` | change a document's groups and/or name across all versions |
 | `POST /v1/query` | one question → grounded answer with cited sources (and pages) |
 | `POST /v1/chat` | multi-turn with `session_id`; follow-ups are rewritten for retrieval |
 | `POST /v1/ingestion/jobs`, `GET /v1/ingestion/jobs/{id}` | background ingestion and its status |
@@ -593,6 +594,51 @@ Limits and metrics are per process. That is correct for one replica; with severa
 
 **Android-developer translation:** this is Crashlytics plus Firebase Performance for the backend: every request leaves a breadcrumb with an ID you can search for, dashboards come from counters rather than guesswork, and graceful shutdown is `onStop()` finishing its work instead of the process being killed mid-write.
 
+## Phase 19: source identity and permission updates
+
+Phase 17 versioned documents by **filename**. That breaks as soon as documents come from somewhere real: renaming `handbook.pdf` to `handbook-2026.pdf` produced two unrelated documents that both answered questions, identical bytes in two folders were merged into one, and changing who may read a document meant deleting and re-uploading it.
+
+**A logical document is now identified by where it comes from**, not by its name ([`migrations/006_source_identity.sql`](migrations/006_source_identity.sql)):
+
+```text
+(source_system, source_id)    the logical document: "upload"/"handbook", later "gdrive"/<file id>
+  └─ versions                 v1, v2, … one 'ready', older 'superseded'
+       source                 display name (the latest filename); renaming changes only this
+       source_version         the origin's change marker (ETag / revision id), when it has one
+       source_modified_at     when the origin says it changed
+       last_checked_at        when we last confirmed it is current (freshness)
+```
+
+Uploads accept optional `source_id`, `source_system`, `source_version`, and `source_modified_at`; a plain upload uses the filename as its `source_id`, so earlier behavior is unchanged and existing documents were migrated in place.
+
+**Change detection before any work.** Ingestion compares the incoming upload with the current version *before* parsing or embedding:
+
+```text
+same source_version as current  → unchanged: touch last_checked_at (and the name), stop
+same content hash as current    → unchanged: same
+otherwise                       → parse → chunk → embed → new version, supersede the old one
+```
+
+The response says `"unchanged": true` when nothing was re-indexed. `document_id` now includes the source identity, so identical bytes in two places are two documents, each with its own ACL.
+
+**Permission updates (`PATCH /v1/documents/{id}`).** Change `allowed_groups` and/or the display name (`filename`) of a logical document without re-uploading:
+
+- It applies to **every version** of that document the caller can see, so an older version never keeps a looser ACL than the current one.
+- Changes take effect on the next query: the ACL is checked inside the database query, and citations use the current display name.
+- A new version inherits the current version's groups when the upload omits `allowed_groups`; sending `[]` makes it tenant-wide. Previously, every re-upload silently reset the ACL to tenant-wide.
+- If the new ACL excludes the caller, the update succeeds and the response says `"visible": false`. Callers who cannot see a document get `404`, the same as for a missing one. Every change is written to the audit log.
+
+```bash
+curl -X PATCH localhost:8000/v1/documents/<id> -H "x-api-key: $KEY" \
+  -d '{"allowed_groups": ["hr"], "filename": "Employee Handbook 2026"}'
+```
+
+In the console, each document has an **Edit** button (name and groups), and the upload form takes an optional **Document ID**, so a renamed file can continue as the next version of the same document.
+
+Still to come (see the lifecycle notes in the roadmap): chunk-level diffs with an embedding cache, deletion that also clears chat history, logs and backups, and a connector that detects source changes by itself.
+
+**Android-developer translation:** `source_id` is a stable primary key instead of using the display name as the key, the `ETag` check is a conditional `GET` that returns 304 so nothing is downloaded or re-parsed, and `PATCH` updates the permission metadata the way you would update a Room row instead of deleting and re-inserting it.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -614,7 +660,9 @@ The repository will grow in this order:
 15. **Phase 15 — evaluation that counts:** a larger golden set with unanswerable questions, answer-level metrics, the real hybrid pipeline, and a CI regression gate.
 16. **Phase 16 — model gateway:** retries with backoff, circuit breaker, fallback, token budgets, and usage accounting.
 17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
-18. **Phase 18 — operations (this phase):** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
+18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
+
+19. **Phase 19 — source identity and permission updates (this phase):** documents identified by source rather than filename, unchanged re-uploads skipped before parsing, renames as metadata, and `PATCH` for ACLs and names across all versions.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

@@ -117,7 +117,20 @@ function renderDocument(doc) {
     parts.push("superseded");
     item.classList.add("superseded");
   }
+  if (doc.source_id && doc.source_id !== doc.source) parts.push(`id ${doc.source_id}`);
   item.querySelector(".doc-meta").textContent = parts.join(" · ");
+  item.title = `Last checked ${new Date(doc.last_checked_at).toLocaleString()}`;
+  const form = item.querySelector(".doc-form");
+  item.querySelector(".doc-edit").addEventListener("click", () => {
+    form.querySelector(".doc-form-name").value = doc.source;
+    form.querySelector(".doc-form-groups").value = (doc.allowed_groups || []).join(", ");
+    form.hidden = !form.hidden;
+  });
+  form.querySelector(".doc-form-cancel").addEventListener("click", () => { form.hidden = true; });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveDocument(doc, form);
+  });
   item.querySelector(".doc-delete").addEventListener("click", async () => {
     if (!window.confirm(`Delete ${doc.source} (v${doc.version})?`)) return;
     try {
@@ -129,6 +142,26 @@ function renderDocument(doc) {
     }
   });
   return item;
+}
+
+async function saveDocument(doc, form) {
+  const name = form.querySelector(".doc-form-name").value.trim();
+  const groups = form.querySelector(".doc-form-groups").value
+    .split(",").map((g) => g.trim()).filter(Boolean);
+  const changes = { allowed_groups: groups };
+  if (name && name !== doc.source) changes.filename = name;
+  try {
+    const result = await api("PATCH", `/v1/documents/${encodeURIComponent(doc.document_id)}`, changes);
+    setUploadStatus(
+      result.visible
+        ? `Updated ${result.source}.`
+        : "Updated. You are not in those groups, so the document is now hidden from you.",
+      "ok",
+    );
+    refreshDocuments();
+  } catch (error) {
+    setUploadStatus(describeError(error), "error");
+  }
 }
 
 function setUploadStatus(text, kind = "") {
@@ -172,7 +205,10 @@ async function upload(event) {
     // A pasted note without a name still uploads; the name only labels it.
     payload = { filename: $("paste-name").value.trim() || "pasted-text.txt", content: $("paste-text").value };
   }
+  // Leaving groups empty keeps the current version's groups (or none for a new document).
   if (groups.length) payload.allowed_groups = groups;
+  const sourceId = $("source-id").value.trim();
+  if (sourceId) payload.source_id = sourceId;
   // Large files can take minutes to embed; queue them so the page stays responsive.
   const large = Boolean(state.file && state.file.size > BACKGROUND_ABOVE_BYTES);
   const background = $("as-job").checked || large;
@@ -193,6 +229,7 @@ async function upload(event) {
     $("file").value = "";
     $("paste-text").value = "";
     $("paste-name").value = "";
+    $("source-id").value = "";
     refreshDocuments();
   } catch (error) {
     setUploadStatus(describeError(error), "error");
@@ -202,7 +239,9 @@ async function upload(event) {
 }
 
 function reportStored(name, result) {
-  if (result.already_existed && !result.superseded.length) {
+  if (result.unchanged) {
+    setUploadStatus(`${name} is unchanged (still v${result.version}); nothing re-indexed.`, "ok");
+  } else if (result.already_existed && !result.superseded.length) {
     setUploadStatus(`${name} was already indexed (v${result.version}).`, "ok");
   } else {
     const replaced = result.superseded.length ? `, replacing ${result.superseded.length} older version` : "";

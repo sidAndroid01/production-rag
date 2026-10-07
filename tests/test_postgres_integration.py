@@ -165,3 +165,57 @@ def test_job_queue_processes_retries_and_isolates_tenants(
         )
     assert queue.run_once()
     assert queue.get(tenant, stuck.id).status == "completed"  # type: ignore[union-attr]
+
+
+def test_source_identity_acl_inheritance_and_updates(
+    store: PostgresPersistence, tenant: str
+) -> None:
+    from persistence import SourceRef
+
+    def ingest_as(text: str, name: str, source_id: str, **options: object) -> object:
+        result = RagIngestionPipeline().ingest_segments(
+            text.encode(), [(None, text)], name, tenant, identity=f"upload/{source_id}"
+        )
+        return store.persist(
+            result,
+            vectors(len(result.chunks)),
+            source=SourceRef(id=source_id),
+            groups=["hr"],  # uploading as an HR member, as the API would
+            **options,
+        )
+
+    v1 = ingest_as("Leave is 15 days.", "handbook.txt", "handbook", allowed_groups=["hr"])
+    v2 = ingest_as("Leave is 20 days.", "handbook-2026.txt", "handbook", allowed_groups=None)
+    assert v2.version == 2 and v2.superseded == (v1.document_id,)  # type: ignore[attr-defined]
+    current = store.current_version(tenant, SourceRef(id="handbook"), ["hr"])
+    assert current is not None and current["source"] == "handbook-2026.txt"
+    assert current["allowed_groups"] == ["hr"]  # inherited, not reset
+    assert store.current_version(tenant, SourceRef(id="handbook")) is None  # hidden
+
+    # Same bytes as v2 under another identity is a separate document.
+    copy = ingest_as("Leave is 20 days.", "copy.txt", "elsewhere/handbook", allowed_groups=[])
+    assert copy.document_id != v2.document_id  # type: ignore[attr-defined]
+
+    found, row = store.update_document(
+        tenant,
+        v1.document_id,
+        ["hr"],
+        allowed_groups=[],
+        display_name="Handbook",  # type: ignore[attr-defined]
+    )
+    assert found and row is not None and row["source"] == "Handbook"
+    everyone = store.list_documents(tenant, include_superseded=True)
+    assert {d["document_id"] for d in everyone} >= {v1.document_id, v2.document_id}  # type: ignore[attr-defined]
+    assert store.update_document(tenant, "missing", allowed_groups=[]) == (False, None)
+    found, row = store.update_document(tenant, v2.document_id, allowed_groups=["finance"])  # type: ignore[attr-defined]
+    assert found and row is None  # caller removed their own access
+
+
+def test_migration_backfilled_source_ids_for_old_documents(store: PostgresPersistence) -> None:
+    with store._connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = 'documents' "
+            "AND column_name IN ('source_system', 'source_id', 'source_version', "
+            "'source_modified_at', 'last_checked_at')"
+        )
+        assert cursor.fetchone()[0] == 5

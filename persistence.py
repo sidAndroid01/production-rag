@@ -12,6 +12,7 @@ import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,21 @@ from embeddings import DIMENSIONS, MODEL_NAME
 # Rows are visible when the document has no ACL or shares a group with the
 # caller. Applied in SQL before LIMIT so restricted rows never use top-k slots.
 ACL_FILTER = "(cardinality(d.allowed_groups) = 0 OR d.allowed_groups && %s::text[])"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRef:
+    """Where a document comes from: the logical document that versions share.
+
+    ``system`` is the origin ("upload", later "gdrive", "s3", ...); ``id`` is
+    that system's stable identifier. ``version`` is the origin's own change
+    marker (ETag, revision ID) when it has one.
+    """
+
+    system: str = "upload"
+    id: str = ""
+    version: str | None = None
+    modified_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,17 +109,20 @@ class PostgresPersistence:
         result: Any,
         embeddings: Sequence[Sequence[float]],
         model_name: str = MODEL_NAME,
-        allowed_groups: Sequence[str] = (),
+        allowed_groups: Sequence[str] | None = (),
         *,
         groups: Sequence[str] = (),
         content_type: str = "text/plain",
+        source: SourceRef | None = None,
     ) -> PersistResult:
         """Atomically store one ingestion result as the current version of its source.
 
-        The content hash is unique per tenant, so retries and identical uploads
-        are idempotent. A new upload for an existing source becomes the next
-        version and supersedes the older ones the uploader can see (``groups``);
-        re-uploading a superseded version's exact bytes reinstates it.
+        ``source`` identifies the logical document (defaulting to the filename
+        for plain uploads). Content is unique within a logical document, so
+        retries and identical uploads are idempotent. A new upload becomes the
+        next version and supersedes the older ones the uploader can see
+        (``groups``); re-uploading a superseded version's exact bytes reinstates
+        it. ``allowed_groups=None`` inherits the current version's ACL.
         """
         chunks = tuple(result.chunks)
         if not chunks:
@@ -122,21 +141,39 @@ class PostgresPersistence:
             normalized_embeddings.append("[" + ",".join(map(str, vector)) + "]")
         first = chunks[0]
         tenant_id = first.tenant_id
+        source = source or SourceRef(id=first.source)
         with self._connect() as connection, connection.cursor() as cursor:
             self._set_tenant(cursor, tenant_id)
-            # Serialize uploads of the same source so only one version is current.
+            # Serialize uploads of the same logical document so only one becomes current.
             cursor.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{tenant_id}/{first.source}",)
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"{tenant_id}/{source.system}/{source.id}",),
             )
+            if allowed_groups is None:
+                cursor.execute(
+                    f"""
+                        SELECT allowed_groups FROM documents AS d
+                        WHERE tenant_id = %s AND source_system = %s AND source_id = %s
+                          AND status = 'ready' AND {ACL_FILTER}
+                        ORDER BY version DESC LIMIT 1
+                        """,
+                    (tenant_id, source.system, source.id, list(groups)),
+                )
+                inherited = cursor.fetchone()
+                allowed_groups = list(inherited[0]) if inherited else []
             cursor.execute(
                 """
                     INSERT INTO documents
                         (document_id, tenant_id, source, content_sha256, chunk_count,
-                         allowed_groups, content_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (tenant_id, content_sha256) DO UPDATE
-                        SET updated_at = now()
-                    RETURNING document_id, (xmax = 0) AS inserted, status, source, version
+                         allowed_groups, content_type, source_system, source_id,
+                         source_version, source_modified_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, source_system, source_id, content_sha256) DO UPDATE
+                        SET updated_at = now(), last_checked_at = now(),
+                            source_version = coalesce(
+                                EXCLUDED.source_version, documents.source_version
+                            )
+                    RETURNING document_id, (xmax = 0) AS inserted, status, version
                     """,
                 (
                     result.document_id,
@@ -146,9 +183,13 @@ class PostgresPersistence:
                     len(chunks),
                     list(allowed_groups),
                     content_type,
+                    source.system,
+                    source.id,
+                    source.version,
+                    source.modified_at,
                 ),
             )
-            document_id, inserted, status, source, version = cursor.fetchone()
+            document_id, inserted, status, version = cursor.fetchone()
             if not inserted and status == "ready":
                 return PersistResult(document_id, 0, True, version)
             if inserted:
@@ -175,32 +216,109 @@ class PostgresPersistence:
                         for chunk, embedding in zip(chunks, normalized_embeddings, strict=True)
                     ),
                 )
+            identity = (tenant_id, source.system, source.id, document_id, list(groups))
             cursor.execute(
                 f"""
                     UPDATE documents AS d SET status = 'superseded', updated_at = now()
-                    WHERE tenant_id = %s AND source = %s AND document_id <> %s
-                      AND status = 'ready' AND {ACL_FILTER}
+                    WHERE tenant_id = %s AND source_system = %s AND source_id = %s
+                      AND document_id <> %s AND status = 'ready' AND {ACL_FILTER}
                     RETURNING document_id
                     """,
-                (tenant_id, source, document_id, list(groups)),
+                identity,
             )
             superseded = tuple(row[0] for row in cursor.fetchall())
             cursor.execute(
                 f"""
                     SELECT coalesce(max(version), 0) FROM documents AS d
-                    WHERE tenant_id = %s AND source = %s AND document_id <> %s AND {ACL_FILTER}
+                    WHERE tenant_id = %s AND source_system = %s AND source_id = %s
+                      AND document_id <> %s AND {ACL_FILTER}
                     """,
-                (tenant_id, source, document_id, list(groups)),
+                identity,
             )
             version = int(cursor.fetchone()[0]) + 1
+            # The newest upload's filename becomes the display name of the document.
             cursor.execute(
-                "UPDATE documents SET status = 'ready', version = %s, updated_at = now() "
-                "WHERE tenant_id = %s AND document_id = %s",
-                (version, tenant_id, document_id),
+                "UPDATE documents SET status = 'ready', version = %s, source = %s, "
+                "updated_at = now() WHERE tenant_id = %s AND document_id = %s",
+                (version, first.source, tenant_id, document_id),
             )
         return PersistResult(
             document_id, len(chunks) if inserted else 0, not inserted, version, superseded
         )
+
+    def current_version(
+        self, tenant_id: str, source: SourceRef, groups: Sequence[str] = ()
+    ) -> dict[str, Any] | None:
+        """The caller-visible current version of a logical document, or None."""
+        rows = self._select_documents(
+            tenant_id,
+            groups,
+            "AND source_system = %s AND source_id = %s AND status = 'ready'",
+            (source.system, source.id),
+        )
+        return rows[0] if rows else None
+
+    def mark_checked(self, tenant_id: str, document_id: str) -> None:
+        """Record that the source was checked and found unchanged."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
+            cursor.execute(
+                "UPDATE documents SET last_checked_at = now() "
+                "WHERE tenant_id = %s AND document_id = %s",
+                (tenant_id, document_id),
+            )
+
+    def update_document(
+        self,
+        tenant_id: str,
+        document_id: str,
+        groups: Sequence[str] = (),
+        *,
+        allowed_groups: Sequence[str] | None = None,
+        display_name: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Change the ACL and/or display name of a logical document, all versions.
+
+        ``document_id`` may name any version the caller can see. Returns
+        ``(found, row)``: row is None when the new ACL excludes the caller.
+        """
+        with self._connect() as connection, connection.cursor() as cursor:
+            self._set_tenant(cursor, tenant_id)
+            cursor.execute(
+                f"""
+                    SELECT source_system, source_id FROM documents AS d
+                    WHERE tenant_id = %s AND document_id = %s AND {ACL_FILTER}
+                    """,
+                (tenant_id, document_id, list(groups)),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return False, None
+            system, source_id = row
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"{tenant_id}/{system}/{source_id}",),
+            )
+            cursor.execute(
+                f"""
+                    UPDATE documents AS d SET
+                        allowed_groups = coalesce(%s::text[], allowed_groups),
+                        source = coalesce(%s, source),
+                        updated_at = now()
+                    WHERE tenant_id = %s AND source_system = %s AND source_id = %s
+                      AND {ACL_FILTER}
+                    """,
+                (
+                    list(allowed_groups) if allowed_groups is not None else None,
+                    display_name,
+                    tenant_id,
+                    system,
+                    source_id,
+                    list(groups),
+                ),
+            )
+        # Read back with the *new* ACL: the caller may have removed their own access.
+        return True, self.get_document(tenant_id, document_id, groups)
 
     def search_similar(
         self,
@@ -385,8 +503,9 @@ class PostgresPersistence:
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     DOCUMENT_COLUMNS = (
-        "document_id, source, version, status, content_type, content_sha256, chunk_count, "
-        "allowed_groups, created_at, updated_at"
+        "document_id, source, source_system, source_id, version, status, content_type, "
+        "content_sha256, chunk_count, allowed_groups, source_version, source_modified_at, "
+        "last_checked_at, created_at, updated_at"
     )
 
     def _select_documents(

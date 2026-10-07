@@ -111,17 +111,24 @@ class RagIngestionPipeline:
         segments: Sequence[tuple[int | None, str]],
         filename: str,
         tenant_id: str,
+        identity: str | None = None,
     ) -> IngestResult:
         """Chunk already-extracted text, keeping each chunk within one page.
 
         ``original`` is the uploaded file; its hash is the document identity.
         ``segments`` are ``(page, text)`` pairs from a parser (page is None for
-        formats without pages).
+        formats without pages). ``identity`` names the logical document
+        (e.g. ``"upload/handbook"``); the same bytes under two identities are
+        two documents, so it is part of ``document_id``.
         """
         filename = self._normalize_identifier(filename, "filename")
         tenant_id = self._normalize_identifier(tenant_id, "tenant_id")
         digest = hashlib.sha256(original).hexdigest()
-        document_id = digest[:24]
+        document_id = (
+            hashlib.sha256(f"{identity}\x00{digest}".encode()).hexdigest()[:24]
+            if identity
+            else digest[:24]
+        )
         created_at = datetime.now(UTC)
         pieces = [
             (page, piece)

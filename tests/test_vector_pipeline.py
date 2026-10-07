@@ -37,6 +37,13 @@ class FakePersistence:
     def check_connection(self) -> None:
         return
 
+    def current_version(self, tenant_id: str, source: object, groups: object) -> None:
+        del tenant_id, source, groups
+        return None
+
+    def mark_checked(self, tenant_id: str, document_id: str) -> None:
+        del tenant_id, document_id
+
     def persist(
         self,
         result: object,

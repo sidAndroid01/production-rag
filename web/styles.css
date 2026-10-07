@@ -141,9 +141,14 @@ details[open] { display: flex; flex-direction: column; gap: 6px; }
 
 .doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
 .doc {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-direction: column; gap: 8px;
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
 }
+.doc-row { display: flex; align-items: center; gap: 8px; }
+.doc-edit { padding: 4px 10px; font-size: 13px; }
+.doc-form { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.doc-form label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); }
+.doc-form .hint { margin: 0; }
 .doc.superseded { opacity: 0.55; }
 .doc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .doc-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

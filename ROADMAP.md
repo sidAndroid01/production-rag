@@ -17,7 +17,10 @@ tested; see the matching README phase for details and limits.
 - [x] hybrid vector + full-text search, rank fusion, reranking, group ACLs in SQL — Phases 7, 13
 - [x] durable background ingestion jobs with retries and crash recovery — Phase 17
 - [x] PDF/HTML/Markdown parsing with content sniffing and a sandboxed parser — Phase 17
+- [x] stable source identity, change detection before re-indexing, and ACL updates without re-upload — Phase 19
 - [ ] malware scanning and object storage for original uploads
+- [ ] chunk-level diffs with an embedding cache; full deletion across chat history, logs, and backups
+- [ ] source connectors (change feeds, webhooks, nightly reconciliation) and a sync-lag metric
 - [ ] embedding retries/backfill command for a model change
 
 ## 3. Generation and safety

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -36,7 +37,7 @@ from memory_store import InMemoryStore
 from observability import DailyTokenBudget, Metrics, RateLimiter, configure_logging
 from parsers import parse
 from permissions import Principal, can_read, normalize_groups
-from persistence import PostgresPersistence
+from persistence import PostgresPersistence, SourceRef
 from providers import (
     ABSTENTION,
     ChatTurn,
@@ -82,6 +83,8 @@ Handler = Callable[[Request], tuple[int, dict[str, Any]]]
 logger = logging.getLogger("rag.api")
 usage_logger = logging.getLogger("rag.usage")
 audit_logger = logging.getLogger("rag.audit")
+
+SOURCE_SYSTEM_RE = re.compile(r"[a-z0-9_-]{1,32}")
 
 # Calibrated on evals/datasets/golden-v2.json (see README, Phase 15).
 LEXICAL_MIN_SCORE = 0.15
@@ -173,6 +176,12 @@ class RagApiApplication:
                 "DELETE",
                 re.compile(r"/v1/documents/(?P<document_id>[^/]+)"),
                 self._delete_document,
+                True,
+            ),
+            (
+                "PATCH",
+                re.compile(r"/v1/documents/(?P<document_id>[^/]+)"),
+                self._update_document,
                 True,
             ),
             ("POST", re.compile(r"/v1/query"), self._query, True),
@@ -358,11 +367,38 @@ class RagApiApplication:
 
     # -- documents --------------------------------------------------------
 
+    @staticmethod
+    def _source_fields(payload: dict[str, Any], filename: str) -> dict[str, Any]:
+        """Validate the optional source identity; plain uploads use the filename."""
+        system = payload.get("source_system", "upload")
+        source_id = payload.get("source_id", filename)
+        version = payload.get("source_version")
+        modified = payload.get("source_modified_at")
+        if not isinstance(system, str) or not SOURCE_SYSTEM_RE.fullmatch(system):
+            raise ValueError("source_system must be 1-32 lowercase letters, digits, - or _")
+        if not isinstance(source_id, str) or not source_id.strip() or len(source_id) > 512:
+            raise ValueError("source_id must be a non-empty string of at most 512 characters")
+        if version is not None and (not isinstance(version, str) or len(version) > 256):
+            raise ValueError("source_version must be a string of at most 256 characters")
+        if modified is not None:
+            try:
+                datetime.fromisoformat(str(modified))
+            except ValueError as exc:
+                raise ValueError("source_modified_at must be an ISO-8601 timestamp") from exc
+        return {
+            "source_system": system,
+            "source_id": source_id.strip(),
+            "source_version": version,
+            "source_modified_at": modified,
+        }
+
     def _document_job(self, request: Request) -> dict[str, Any]:
         """Validate an upload and bind it to the caller's identity.
 
         Send text as ``content``, or any supported file as ``content_base64``
-        with an optional ``content_type``.
+        with an optional ``content_type``. ``source_id`` names the logical
+        document (default: the filename); omit ``allowed_groups`` to keep the
+        current version's ACL.
         """
         payload = request.payload
         filename = payload.get("filename")
@@ -384,27 +420,50 @@ class RagApiApplication:
         principal = request.caller
         return {
             "tenant_id": self._tenant(request),
-            "filename": filename,
+            "filename": filename.strip(),
             "content_base64": encoded,
             "content_type": content_type,
-            "allowed_groups": list(normalize_groups(payload.get("allowed_groups"))),
+            # None (omitted) inherits the current version's ACL; [] makes it tenant-wide.
+            "allowed_groups": (
+                list(normalize_groups(payload["allowed_groups"]))
+                if "allowed_groups" in payload
+                else None
+            ),
+            **self._source_fields(payload, filename.strip()),
             # The uploader's groups decide which older versions it may supersede.
             "groups": sorted(principal.groups),
         }
 
     def _ingest_document(self, job: dict[str, Any]) -> dict[str, Any]:
         """Parse, chunk, embed and store one validated job; runs inline or on a worker."""
+        modified = job.get("source_modified_at")
+        source = SourceRef(
+            system=job.get("source_system", "upload"),
+            id=job.get("source_id") or job["filename"],
+            version=job.get("source_version"),
+            modified_at=datetime.fromisoformat(modified) if modified else None,
+        )
+        groups = job.get("groups", [])
         data = base64.b64decode(job["content_base64"])
+        current = self.store.current_version(job["tenant_id"], source, groups)
+        # Cheapest checks first: the source's own version marker, then the bytes.
+        # Either match means nothing to parse or embed.
+        if current is not None and (
+            (source.version is not None and current["source_version"] == source.version)
+            or current["content_sha256"] == hashlib.sha256(data).hexdigest()
+        ):
+            return self._unchanged(job, current)
         parsed = parse(data, job["filename"], job.get("content_type"))
         result = self.ingestion.ingest_segments(
-            data, parsed.segments, job["filename"], job["tenant_id"]
+            data,
+            parsed.segments,
+            job["filename"],
+            job["tenant_id"],
+            identity=f"{source.system}/{source.id}",
         )
         if not result.chunks:
             raise ValueError("document has no text to index")
-        options = {
-            "groups": job.get("groups", []),
-            "content_type": parsed.content_type,
-        }
+        options = {"groups": groups, "content_type": parsed.content_type, "source": source}
         if self.persistence is not None:
             assert self.embedder is not None
             embeddings = self.embedder.embed_documents([chunk.text for chunk in result.chunks])
@@ -415,12 +474,86 @@ class RagApiApplication:
             stored = self.memory.persist(result, job["allowed_groups"], **options)
         return {
             "document_id": stored.document_id,
+            "source_system": source.system,
+            "source_id": source.id,
             "content_sha256": result.content_sha256,
             "content_type": parsed.content_type,
             "version": stored.version,
             "superseded": list(stored.superseded),
             "chunks_created": stored.chunks_written,
             "already_existed": stored.already_existed,
+            "unchanged": False,
+        }
+
+    def _unchanged(self, job: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        """The source has not changed: refresh freshness (and the name) only."""
+        tenant_id, document_id = job["tenant_id"], current["document_id"]
+        self.store.mark_checked(tenant_id, document_id)
+        if job["filename"] != current["source"]:
+            self.store.update_document(
+                tenant_id, document_id, job.get("groups", []), display_name=job["filename"]
+            )
+        return {
+            "document_id": document_id,
+            "source_system": current["source_system"],
+            "source_id": current["source_id"],
+            "content_sha256": current["content_sha256"],
+            "content_type": current["content_type"],
+            "version": current["version"],
+            "superseded": [],
+            "chunks_created": 0,
+            "already_existed": True,
+            "unchanged": True,
+        }
+
+    def _update_document(self, request: Request) -> tuple[int, dict[str, Any]]:
+        """PATCH a logical document's ACL and/or display name across all versions."""
+        principal = request.caller
+        tenant_id = self._tenant(request)
+        payload = request.payload
+        try:
+            allowed_groups = (
+                normalize_groups(payload["allowed_groups"]) if "allowed_groups" in payload else None
+            )
+        except ValueError as exc:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+        display_name = payload.get("filename")
+        if display_name is not None and (
+            not isinstance(display_name, str) or not display_name.strip()
+        ):
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "filename must be a non-empty string")
+        if allowed_groups is None and display_name is None:
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY, "send allowed_groups and/or filename to change"
+            )
+        document_id = request.params["document_id"]
+        found, row = self.store.update_document(
+            tenant_id,
+            document_id,
+            sorted(principal.groups),
+            allowed_groups=allowed_groups,
+            display_name=display_name.strip() if display_name else None,
+        )
+        if not found:
+            raise ApiError(HTTPStatus.NOT_FOUND, "document not found")
+        audit_logger.info(
+            "document.updated",
+            extra={
+                "request_id": request.request_id,
+                "tenant_id": tenant_id,
+                "user_id": principal.user_id,
+                "document_id": document_id,
+                "allowed_groups": list(allowed_groups) if allowed_groups is not None else None,
+                "renamed": display_name is not None,
+            },
+        )
+        if row is None:
+            # The new ACL excludes the caller; confirm without revealing more.
+            return HTTPStatus.OK, {"document_id": document_id, "updated": True, "visible": False}
+        return HTTPStatus.OK, {
+            **{key: _iso(value) for key, value in row.items()},
+            "updated": True,
+            "visible": True,
         }
 
     def _create_document(self, request: Request) -> tuple[int, dict[str, Any]]:
@@ -754,7 +887,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         """CORS preflight for browser clients listed in RAG_CORS_ORIGINS."""
         self.send_response(HTTPStatus.NO_CONTENT)
         if self.headers.get("origin") in self.cors_origins:
-            self.send_header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS")
             self.send_header(
                 "access-control-allow-headers", "content-type, x-api-key, x-request-id"
             )
