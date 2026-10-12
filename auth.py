@@ -10,7 +10,9 @@ Configure with ``RAG_API_KEYS_FILE`` pointing at a JSON list::
     [{"name": "alice-laptop", "key_sha256": "<hex>", "tenant_id": "acme",
       "user_id": "alice", "groups": ["hr"]}]
 
-Create entries with ``python scripts/create_api_key.py``. Without a key file,
+or put the same JSON in the ``RAG_API_KEYS_JSON`` variable (for hosts that
+only offer environment secrets). Create entries with
+``python scripts/create_api_key.py``. Without either,
 development mode accepts a single ``RAG_API_KEY`` bound to ``RAG_TENANT_ID``.
 """
 
@@ -73,9 +75,20 @@ class ApiKeyStore:
         path = environ.get("RAG_API_KEYS_FILE")
         if path:
             return cls.from_entries(json.loads(Path(path).read_text(encoding="utf-8")))
+        # Hosts such as Hugging Face Spaces offer secrets only as variables.
+        inline = environ.get("RAG_API_KEYS_JSON")
+        if inline:
+            try:
+                entries = json.loads(inline)
+            except json.JSONDecodeError as exc:
+                raise ValueError("RAG_API_KEYS_JSON is not valid JSON") from exc
+            return cls.from_entries(entries)
         key = environ.get("RAG_API_KEY") or DEVELOPMENT_KEY
         if production and key == DEVELOPMENT_KEY:
-            raise RuntimeError("set RAG_API_KEYS_FILE or a non-default RAG_API_KEY in production")
+            raise RuntimeError(
+                "set RAG_API_KEYS_JSON, RAG_API_KEYS_FILE, or a non-default RAG_API_KEY "
+                "in production"
+            )
         tenant_id = (environ.get("RAG_TENANT_ID") or "default").strip()
         return cls.single(key, tenant_id)
 

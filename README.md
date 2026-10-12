@@ -18,6 +18,8 @@ curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
   -d '{"question": "How long do I have to get a refund?"}'
 ```
 
+To put it online for free, follow [Deploy: Hugging Face Spaces + Neon + Groq](docs/deploy-huggingface.md).
+
 Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
 
 | Route | Purpose |

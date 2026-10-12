@@ -104,3 +104,14 @@ def test_production_refuses_the_development_key() -> None:
     store = ApiKeyStore.from_environment({"RAG_API_KEY": "real", "RAG_TENANT_ID": "acme"})
     assert store.authenticate("real") == Principal("acme", "api")
     assert ApiKeyStore.from_environment({}).authenticate(DEVELOPMENT_KEY) is not None
+
+
+def test_keys_can_come_from_a_json_variable() -> None:
+    entry = {"key_sha256": hash_key("k1"), "tenant_id": "t", "user_id": "u", "groups": []}
+    store = ApiKeyStore.from_environment(
+        {"APP_ENV": "production", "RAG_API_KEYS_JSON": json.dumps([entry])}
+    )
+    assert store.authenticate("k1") == Principal("t", "u")
+    assert store.authenticate(DEVELOPMENT_KEY) is None
+    with pytest.raises(ValueError, match="not valid JSON"):
+        ApiKeyStore.from_environment({"RAG_API_KEYS_JSON": "[{oops"})

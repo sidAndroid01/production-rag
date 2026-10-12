@@ -42,6 +42,7 @@ services:
       RAG_API_KEY: ${RAG_API_KEY:-}
       # Multi-tenant mode: a JSON key file (see auth.py); uncomment the volume.
       RAG_API_KEYS_FILE: ${RAG_API_KEYS_FILE:-}
+      RAG_API_KEYS_JSON: ${RAG_API_KEYS_JSON:-}
       RAG_MODEL_BASE_URL: ${RAG_MODEL_BASE_URL:-}
       RAG_MODEL_API_KEY: ${RAG_MODEL_API_KEY:-}
       RAG_MODEL_NAME: ${RAG_MODEL_NAME:-}
