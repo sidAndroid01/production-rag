@@ -66,8 +66,40 @@
           <label><input type="radio" name="mode" value="chat" checked> Chat</label>
           <label><input type="radio" name="mode" value="query"> Single question</label>
         </div>
+        <button id="llm-toggle" class="ghost" type="button" aria-expanded="false" aria-controls="llm-panel">Model: server default</button>
         <button id="new-chat" class="ghost" type="button">New chat</button>
       </div>
+
+      <form id="llm-panel" class="llm-panel" hidden>
+        <p class="hint">Use your own LLM account. Your key stays in this browser and is sent only with your questions; the server uses it for that request and never stores or logs it.</p>
+        <div class="llm-grid">
+          <label>Provider
+            <select id="llm-provider"><option value="">Server default</option></select>
+          </label>
+          <label>Model
+            <input id="llm-model" type="text" list="llm-models" placeholder="model ID" spellcheck="false">
+            <datalist id="llm-models"></datalist>
+          </label>
+          <label class="llm-wide" id="llm-url-row" hidden>Base URL (OpenAI-compatible, public https)
+            <input id="llm-url" type="url" placeholder="https://ollama.example.com/v1" spellcheck="false">
+          </label>
+          <label class="llm-wide">API key
+            <input id="llm-key" type="password" placeholder="your provider API key" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <div class="row between">
+          <label class="toggle"><input id="llm-remember" type="checkbox"> Remember on this device</label>
+          <a id="llm-key-link" class="hint" target="_blank" rel="noopener noreferrer" hidden>Get a key</a>
+        </div>
+        <div class="row between">
+          <button id="llm-clear" class="ghost" type="button">Use server default</button>
+          <span class="row">
+            <button id="llm-test" class="ghost" type="button">Test</button>
+            <button type="submit">Save</button>
+          </span>
+        </div>
+        <p id="llm-status" class="status" aria-live="polite"></p>
+      </form>
 
       <div id="messages" class="messages" aria-live="polite">
         <div class="welcome">

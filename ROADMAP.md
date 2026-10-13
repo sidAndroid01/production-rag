@@ -28,6 +28,7 @@ tested; see the matching README phase for details and limits.
 - [x] model gateway: timeouts, retries, circuit breaker, fallback, token budgets — Phase 16
 - [x] sources isolated from the system prompt; only cited sources returned — Phase 14
 - [x] per-user rate limits and per-tenant daily token budgets (in-process) — Phase 18
+- [x] users bring their own LLM key (never stored), with internal addresses blocked for custom URLs — Phase 20
 - [ ] per-claim citation entailment verification
 - [ ] PII detection/redaction, moderation, and a configurable policy engine
 - [ ] Redis-backed limits and a semantic cache for multi-replica deployments

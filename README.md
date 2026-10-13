@@ -18,7 +18,7 @@ curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
   -d '{"question": "How long do I have to get a refund?"}'
 ```
 
-To put it online for free, follow [Deploy: Hugging Face Spaces + Neon + Groq](docs/deploy-huggingface.md).
+To put it online for free, follow [Deploy: Hugging Face Spaces + Neon](docs/deploy-huggingface.md). Each user brings their own LLM key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom OpenAI-compatible URL) under **Model** in the console; it stays in their browser and is never stored by the server.
 
 Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
 
@@ -30,6 +30,7 @@ Without Docker, `make install && make run` starts the in-memory demo; `make chec
 | `POST /v1/query` | one question → grounded answer with cited sources (and pages) |
 | `POST /v1/chat` | multi-turn with `session_id`; follow-ups are rewritten for retrieval |
 | `POST /v1/ingestion/jobs`, `GET /v1/ingestion/jobs/{id}` | background ingestion and its status |
+| `POST /v1/llm/test` | check the caller's own LLM settings with one tiny call |
 | `GET /health/live`, `GET /health/ready`, `GET /metrics` | probes and Prometheus metrics |
 
 ## Repository history and canonical implementation
@@ -641,6 +642,27 @@ Still to come (see the lifecycle notes in the roadmap): chunk-level diffs with a
 
 **Android-developer translation:** `source_id` is a stable primary key instead of using the display name as the key, the `ETag` check is a conditional `GET` that returns 304 so nothing is downloaded or re-parsed, and `PATCH` updates the permission metadata the way you would update a Room row instead of deleting and re-inserting it.
 
+## Phase 20: bring your own LLM key
+
+A public deployment should not answer everyone's questions on the owner's LLM account. Each user can now use **their own** provider and key, chosen under **Model** in the console:
+
+```text
+browser (key in sessionStorage, or localStorage if "remember")
+  → POST /v1/query {question, llm: {provider, model, api_key[, base_url]}}
+  → validate → one-request gateway around the user's provider (own circuit breaker)
+  → their provider, with their key → answer, or a cited fallback with the reason
+```
+
+- **Providers:** presets for Groq, OpenAI, OpenRouter, Google Gemini, Together AI and Mistral (fixed base URLs), plus a custom OpenAI-compatible URL ([`byok.py`](byok.py)).
+- **The server never keeps the key.** It arrives with each question, is used for that request, and is not stored, logged, or returned. `LlmSettings` hides it even from its own `repr`, and a test checks that it appears in no log record. Errors use fixed wording, because some providers' error messages quote part of the key.
+- **Custom URLs cannot reach internal systems.** Because the *server* makes the call, a user-typed URL could otherwise point at the cloud metadata service or the database. They must be `https`, every address the host resolves to must be public (checked again before each call), credentials in URLs are refused, and redirects are never followed. `RAG_ALLOW_CUSTOM_LLM_URL=0` allows only the presets. A narrow DNS-rebinding window between the check and the connection remains.
+- **Failures are explained.** A rejected key, unknown model, or provider rate limit produces a cited fallback answer with a note such as "HTTP 401 (the provider rejected the API key)". `POST /v1/llm/test` makes one tiny call so the console's **Test** button can check settings before saving.
+- **Cost is the user's.** The server's daily token budget applies only to the server's own model; users' keys never count against it. Without any key, answers are cited quotes, so the app works without an LLM.
+
+Testing against the real providers found a bug no mock would have: Groq's CDN rejects Python's default `User-Agent` ("error code: 1010"), so even valid keys would have failed. Requests now send `production-rag/1.0`, and all six presets return proper authentication errors for an invalid key.
+
+**Android-developer translation:** this is "Sign in with your own account" for the model. The app never holds the credential at rest; it is attached per request like a short-lived bearer token from the user's session, and the server only allows calls to known hosts, as a network security config would.
+
 ## Phase plan
 
 The repository will grow in this order:
@@ -664,7 +686,9 @@ The repository will grow in this order:
 17. **Phase 17 — document lifecycle:** versioned re-uploads, sandboxed PDF/HTML parsing, page citations, and a durable job queue.
 18. **Phase 18 — operations:** request logs, metrics, rate limits, a connection pool, durable chat history, and graceful shutdown.
 
-19. **Phase 19 — source identity and permission updates (this phase):** documents identified by source rather than filename, unchanged re-uploads skipped before parsing, renames as metadata, and `PATCH` for ACLs and names across all versions.
+19. **Phase 19 — source identity and permission updates:** documents identified by source rather than filename, unchanged re-uploads skipped before parsing, renames as metadata, and `PATCH` for ACLs and names across all versions.
+
+20. **Phase 20 — bring your own LLM key (this phase):** per-request provider keys that are never stored, provider presets, public-https-only custom URLs, explained fallbacks, and a connection test.
 
 Each phase adds a focused contract, tests, observability, and an updated README section when it is implemented.
 

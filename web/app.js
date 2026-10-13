@@ -8,6 +8,8 @@ const state = {
   key: sessionStorage.getItem("rag-key") || "",
   session: crypto.randomUUID(),
   connected: false,
+  llm: null, // the user's own provider settings, if any
+  llmRemember: false,
   file: null,
   maxFileBytes: 18_000_000, // replaced by the server's limit on connect
 
@@ -67,8 +69,9 @@ async function connect() {
       "Tenant ", el("strong", "", me.tenant_id),
       " · user ", el("strong", "", me.user_id),
       me.groups.length ? ` · groups ${me.groups.join(", ")}` : "",
-      ` · ${me.storage} · model: ${me.model}`,
+      ` · ${me.storage} · server model: ${me.model}`,
     );
+    setupLlmOptions(me.llm);
     await refreshDocuments();
   } catch (error) {
     state.connected = false;
@@ -331,7 +334,13 @@ function renderMeta(result) {
       meta.append(el("span", "", `${generation.prompt_tokens + generation.completion_tokens} tokens`));
     }
     if (generation.cost_usd) meta.append(el("span", "", `$${generation.cost_usd.toFixed(5)}`));
-    if (generation.degraded) meta.append(el("span", "badge warn", "fallback answer"));
+    if (generation.own_key) meta.append(el("span", "badge", "your key"));
+    if (generation.degraded) {
+      const badge = el("span", "badge warn", "fallback answer");
+      if (generation.note) badge.title = generation.note;
+      meta.append(badge);
+      if (generation.note) meta.append(el("span", "", generation.note));
+    }
   }
   if (result.search_query) meta.append(el("span", "", `searched: “${result.search_query}”`));
   meta.append(el("span", "", `${result._ms} ms`));
@@ -349,8 +358,9 @@ async function ask(event) {
   const pending = addMessage("assistant", "Thinking…", "typing");
   const isChat = mode() === "chat";
   try {
-    const result = await api("POST", isChat ? "/v1/chat" : "/v1/query",
-      isChat ? { question, session_id: state.session } : { question });
+    const body = isChat ? { question, session_id: state.session } : { question };
+    if (state.llm) body.llm = state.llm;
+    const result = await api("POST", isChat ? "/v1/chat" : "/v1/query", body);
     pending.classList.remove("typing");
     if (!result.grounded) pending.classList.add("abstain");
     const sources = renderSources(result.citations);
@@ -371,9 +381,148 @@ function newChat() {
   $("messages").replaceChildren(welcome);
 }
 
+// ---------------------------------------------------------------- your LLM
+// The user's provider settings live only in this browser: sessionStorage by
+// default, localStorage when they choose "Remember on this device".
+
+const LLM_STORE = "rag-llm";
+let llmPresets = { providers: [], custom_allowed: false };
+
+function storage(remember) {
+  try {
+    return remember ? localStorage : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function loadLlm() {
+  for (const store of [storage(false), storage(true)]) {
+    try {
+      const saved = store && store.getItem(LLM_STORE);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      /* unreadable storage: start without saved settings */
+    }
+  }
+  return null;
+}
+
+function saveLlm(settings, remember) {
+  for (const store of [storage(false), storage(true)]) {
+    try { store && store.removeItem(LLM_STORE); } catch { /* ignore */ }
+  }
+  if (!settings) return;
+  try { storage(remember)?.setItem(LLM_STORE, JSON.stringify(settings)); } catch { /* ignore */ }
+}
+
+function setupLlmOptions(presets) {
+  llmPresets = presets || llmPresets;
+  const select = $("llm-provider");
+  select.replaceChildren(new Option("Server default", ""));
+  for (const provider of llmPresets.providers) select.append(new Option(provider.label, provider.id));
+  if (llmPresets.custom_allowed) select.append(new Option("Custom URL (OpenAI-compatible)", "custom"));
+  fillLlmForm(state.llm);
+  showLlmChoice();
+}
+
+function fillLlmForm(settings) {
+  $("llm-provider").value = settings ? settings.provider : "";
+  $("llm-model").value = settings ? settings.model : "";
+  $("llm-key").value = settings ? settings.api_key : "";
+  $("llm-url").value = settings && settings.base_url ? settings.base_url : "";
+  $("llm-remember").checked = Boolean(settings && state.llmRemember);
+  onProviderChange(false);
+}
+
+function onProviderChange(resetModel = true) {
+  const id = $("llm-provider").value;
+  const preset = llmPresets.providers.find((p) => p.id === id);
+  $("llm-models").replaceChildren(...(preset ? preset.models.map((m) => new Option(m, m)) : []));
+  if (resetModel && preset) $("llm-model").value = preset.models[0] || "";
+  $("llm-url-row").hidden = id !== "custom";
+  const link = $("llm-key-link");
+  link.hidden = !preset;
+  if (preset) link.href = preset.key_url;
+}
+
+function readLlmForm() {
+  const provider = $("llm-provider").value;
+  if (!provider) return null;
+  const settings = {
+    provider,
+    model: $("llm-model").value.trim(),
+    api_key: $("llm-key").value.trim(),
+  };
+  if (provider === "custom") settings.base_url = $("llm-url").value.trim();
+  return settings;
+}
+
+function showLlmChoice() {
+  const button = $("llm-toggle");
+  button.textContent = state.llm ? `Model: your ${state.llm.provider} · ${state.llm.model}` : "Model: server default";
+  button.classList.toggle("own", Boolean(state.llm));
+}
+
+function setLlmStatus(text, kind = "") {
+  $("llm-status").textContent = text;
+  $("llm-status").className = `status ${kind}`;
+}
+
+async function testLlm() {
+  const settings = readLlmForm();
+  if (!settings) return setLlmStatus("Choose a provider first.", "error");
+  setLlmStatus("Testing…");
+  try {
+    const result = await api("POST", "/v1/llm/test", { llm: settings });
+    if (result.ok) setLlmStatus(`Works: ${result.model} answered in ${result.latency_ms} ms.`, "ok");
+    else setLlmStatus(`Not working: ${result.error}`, "error");
+  } catch (error) {
+    setLlmStatus(describeError(error), "error");
+  }
+}
+
+function saveLlmForm(event) {
+  event.preventDefault();
+  const settings = readLlmForm();
+  if (settings && (!settings.model || !settings.api_key)) {
+    return setLlmStatus("Model and API key are required.", "error");
+  }
+  const remember = $("llm-remember").checked;
+  state.llm = settings;
+  state.llmRemember = remember;
+  saveLlm(settings ? { ...settings, remember } : null, remember);
+  showLlmChoice();
+  setLlmStatus(settings ? "Saved. Your questions now use your model." : "Using the server default.", "ok");
+}
+
+function clearLlm() {
+  state.llm = null;
+  saveLlm(null, false);
+  fillLlmForm(null);
+  showLlmChoice();
+  setLlmStatus("Your key was removed from this browser. Using the server default.", "ok");
+}
+
 // ---------------------------------------------------------------- wiring
 
 function init() {
+  const saved = loadLlm();
+  if (saved) {
+    const { remember, ...settings } = saved;
+    state.llm = settings;
+    state.llmRemember = Boolean(remember);
+  }
+  $("llm-toggle").addEventListener("click", () => {
+    const panel = $("llm-panel");
+    panel.hidden = !panel.hidden;
+    $("llm-toggle").setAttribute("aria-expanded", String(!panel.hidden));
+  });
+  $("llm-provider").addEventListener("change", () => onProviderChange(true));
+  $("llm-panel").addEventListener("submit", saveLlmForm);
+  $("llm-test").addEventListener("click", testLlm);
+  $("llm-clear").addEventListener("click", clearLlm);
+  showLlmChoice();
   $("api-key").value = state.key;
   $("key-form").addEventListener("submit", (event) => { event.preventDefault(); connect(); });
   $("upload-form").addEventListener("submit", upload);

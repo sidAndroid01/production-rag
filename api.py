@@ -30,6 +30,13 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from auth import ApiKeyStore
+from byok import (
+    LlmSettingsError,
+    build_user_provider,
+    custom_urls_allowed,
+    parse_llm_settings,
+    presets_for_ui,
+)
 from embeddings import Embedder, LocalFastEmbedder
 from gateway import configured_provider
 from history import ChatHistoryStore, PostgresChatHistory
@@ -169,6 +176,7 @@ class RagApiApplication:
             ("GET", re.compile(r"/health/live"), self._live, False),
             ("GET", re.compile(r"/health/ready"), self._ready, False),
             ("GET", re.compile(r"/v1/me"), self._me, True),
+            ("POST", re.compile(r"/v1/llm/test"), self._test_llm, True),
             ("GET", re.compile(r"/v1/documents"), self._list_documents, True),
             ("POST", re.compile(r"/v1/documents"), self._create_document, True),
             ("GET", re.compile(r"/v1/documents/(?P<document_id>[^/]+)"), self._get_document, True),
@@ -363,7 +371,29 @@ class RagApiApplication:
             )
             if hasattr(self.provider, "providers")
             else getattr(self.provider, "name", "provider"),
+            # Users can bring their own model; these are the choices the UI offers.
+            "llm": presets_for_ui(),
         }
+
+    def _user_provider(self, payload: dict[str, Any]) -> ModelProvider | None:
+        """The caller's own model for this request, if their request carries one."""
+        try:
+            settings = parse_llm_settings(payload.get("llm"), allow_custom=custom_urls_allowed())
+        except LlmSettingsError as exc:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+        return build_user_provider(settings) if settings is not None else None
+
+    def _test_llm(self, request: Request) -> tuple[int, dict[str, Any]]:
+        """Make one tiny call with the caller's settings so the UI can say if they work."""
+        provider = self._user_provider(request.payload)
+        if provider is None:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "llm settings are required")
+        started = time.perf_counter()
+        generation = provider.complete("Reply with the word ok.", ["ok"], ())
+        elapsed = round((time.perf_counter() - started) * 1000)
+        if generation.degraded:
+            return HTTPStatus.OK, {"ok": False, "error": generation.note or "the call failed"}
+        return HTTPStatus.OK, {"ok": True, "model": generation.model, "latency_ms": elapsed}
 
     # -- documents --------------------------------------------------------
 
@@ -699,6 +729,9 @@ class RagApiApplication:
         session_id = payload.get("session_id")
         if is_chat and (not isinstance(session_id, str) or not session_id.strip()):
             raise ApiError(HTTPStatus.BAD_REQUEST, "session_id is required for chat")
+        # The caller's own model and key, when they bring one; otherwise the server's.
+        user_provider = self._user_provider(payload)
+        provider = user_provider or self.provider
         prior: tuple[ChatTurn, ...] = ()
         if is_chat:
             assert isinstance(session_id, str)
@@ -707,7 +740,7 @@ class RagApiApplication:
             question = RagQueryPipeline(()).validate_query(question, tenant_id)
             # Follow-ups such as "and for contractors?" are rewritten into a
             # standalone query for retrieval; the model still sees the original.
-            search_query = self.provider.rewrite_query(question, prior) if prior else question
+            search_query = provider.rewrite_query(question, prior) if prior else question
             evidence = self.retrieve(principal, search_query)
         except UnsafeQueryError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
@@ -715,17 +748,17 @@ class RagApiApplication:
         answer, used = ABSTENTION, []
         generation: Generation | None = None
         if evidence:
-            if self.token_budget.remaining(tenant_id) <= 0:
+            # The daily budget protects the server's key; users' own keys are theirs.
+            if user_provider is None and self.token_budget.remaining(tenant_id) <= 0:
                 raise ApiError(
                     HTTPStatus.TOO_MANY_REQUESTS,
                     "daily token budget exhausted",
                     {"retry-after": str(self.token_budget.seconds_until_reset())},
                 )
-            generation = self.provider.complete(
-                question, [chunk.text for chunk, _ in evidence], prior
-            )
+            generation = provider.complete(question, [chunk.text for chunk, _ in evidence], prior)
             tokens = generation.prompt_tokens + generation.completion_tokens
-            self.token_budget.spend(tenant_id, tokens)
+            if user_provider is None:
+                self.token_budget.spend(tenant_id, tokens)
             self.metrics.inc(
                 "rag_generation_tokens_total",
                 "Model tokens by model.",
@@ -771,6 +804,7 @@ class RagApiApplication:
                     "completion_tokens": generation.completion_tokens,
                     "cost_usd": generation.cost_usd,
                     "degraded": generation.degraded,
+                    "own_key": user_provider is not None,
                 },
             )
             response["generation"] = {
@@ -779,6 +813,8 @@ class RagApiApplication:
                 "prompt_tokens": generation.prompt_tokens,
                 "completion_tokens": generation.completion_tokens,
                 "cost_usd": generation.cost_usd,
+                "own_key": user_provider is not None,
+                "note": generation.note,
             }
         if is_chat:
             assert isinstance(session_id, str)

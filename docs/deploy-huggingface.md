@@ -1,20 +1,25 @@
-# Deploy for free: Hugging Face Spaces + Neon + Groq
+# Deploy for free: Hugging Face Spaces + Neon (+ users' own LLM keys)
 
 The result is a public HTTPS URL such as `https://<you>-production-rag.hf.space`,
-with the same console you use locally. No credit card is needed for any of the
-three services.
+with the same console you use locally. No credit card is needed.
+
+**You do not pay for anyone's LLM usage.** Each person enters their own provider
+key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom
+OpenAI-compatible URL) under **Model** in the console. The key stays in their
+browser and is used only for their own questions. People without a key still get
+cited answers, written as quotes from the documents.
 
 ```text
-Browser ──x-api-key──▶ Hugging Face Space (this Docker image: UI + API + worker)
-                              ├──▶ Neon        PostgreSQL + pgvector (your data)
-                              └──▶ Groq        OpenAI-compatible LLM (writes answers)
+Browser ──x-api-key + (their LLM key)──▶ Hugging Face Space (UI + API + worker)
+                                               ├──▶ Neon           PostgreSQL + pgvector
+                                               └──▶ their provider  e.g. Groq, with their key
 ```
 
 | Piece | Free tier (check each site for current limits) | Notes |
 | --- | --- | --- |
 | Hugging Face Space (Docker) | 2 vCPU, 16 GB RAM | Sleeps after a period without visits; the first request then takes ~30 s while it wakes |
 | Neon | ~0.5 GB storage, compute pauses when idle | First query after a pause takes ~1 s |
-| Groq | Rate-limited requests per minute and per day | Shared by every user of your Space |
+| Users' LLM providers | Each user's own account and limits | Groq and Gemini have free tiers; users create their own keys |
 
 Time needed: about 30 minutes.
 
@@ -47,13 +52,29 @@ Time needed: about 30 minutes.
 
 Run `migrate.py` the same way after pulling new code that adds migrations.
 
-## 2. LLM: Groq
+## 2. LLM: nothing to set up on the server
 
-1. Sign up at <https://console.groq.com>, open **API Keys**, and create a key.
-2. Note a model ID from <https://console.groq.com/docs/models>, for example
-   `llama-3.1-8b-instant` (fast) or a larger Llama model (better answers, lower limits).
+Leave `RAG_MODEL_*` unset. Each user brings their own key in the console:
 
-Passages from your users' documents are sent to Groq to write answers.
+1. They open **Model: server default** above the chat, choose a provider, and paste
+   their key. **Get a key** links to that provider's key page (Groq's free tier is a
+   good default: <https://console.groq.com/keys>).
+2. **Test** makes one tiny call and reports clearly if the key or model is wrong.
+3. **Save** keeps the key in this browser tab only, or on this device when
+   "Remember on this device" is ticked. **Use server default** removes it.
+
+What happens to the key: it is sent with each question over HTTPS, used for that
+one request, and never stored, logged, or returned by the server. Passages from
+the user's documents go to *their* provider under *their* account.
+
+Optional: if you do set `RAG_MODEL_*` (your own key), users without a key get
+your model instead of quotes, and `RAG_TENANT_DAILY_TOKEN_BUDGET` caps that
+spending per tenant. Users' own keys never count against it.
+
+Custom URLs (for example a self-hosted Ollama behind HTTPS) must be public
+`https` addresses; private and internal addresses are refused, so the server
+cannot be used to reach its own network. Set `RAG_ALLOW_CUSTOM_LLM_URL=0` to
+offer only the listed providers.
 
 ## 3. API keys for you and your users
 
@@ -83,14 +104,11 @@ the keys.
    | --- | --- | --- |
    | Secret | `DATABASE_URL` | the `rag_app` connection string from step 1.4 |
    | Secret | `RAG_API_KEYS_JSON` | the JSON line from step 3 |
-   | Secret | `RAG_MODEL_API_KEY` | your Groq key |
    | Secret | `RAG_METRICS_TOKEN` | any long random string (protects `/metrics`) |
    | Variable | `APP_ENV` | `production` |
-   | Variable | `RAG_MODEL_BASE_URL` | `https://api.groq.com/openai/v1` |
-   | Variable | `RAG_MODEL_NAME` | the Groq model ID from step 2 |
    | Variable | `RAG_DB_POOL_MAX` | `5` |
    | Variable | `RAG_RATE_LIMIT_PER_MINUTE` | `30` |
-   | Variable | `RAG_TENANT_DAILY_TOKEN_BUDGET` | `200000` (optional cap per tenant per day) |
+   | Variable | `RAG_ALLOW_CUSTOM_LLM_URL` | `1` to allow custom public https LLM URLs, `0` to allow only the listed providers |
 
 3. Create a Hugging Face **access token** with write permission
    (**Settings → Access Tokens**).
@@ -107,7 +125,8 @@ The script sends only files committed to Git (never `.env` or `secrets/`). The S
 then builds the Docker image, which takes a few minutes the first time (follow the
 **Logs** tab). When it shows **Running**, open
 `https://<hf-username>-production-rag.hf.space`, paste your key, and click **Connect**.
-The top bar should read `postgres · model: <groq model> → extractive`.
+The top bar should read `postgres · server model: extractive`. Open **Model**,
+choose your provider, paste your key, **Test**, then **Save**.
 
 To deploy new code: commit it, run the script again.
 
@@ -120,9 +139,8 @@ To deploy new code: commit it, run the script again.
   secret. Their documents stay in their tenant until you delete them.
 - **Lost key:** keys cannot be recovered (only hashes are stored); issue a new one.
 
-Users cannot sign up by themselves or bring their own LLM key yet; every answer
-uses your Groq key and counts toward your Groq limits. The per-user rate limit and
-the daily token budget per tenant protect those limits.
+Users cannot sign up by themselves yet (you issue their app keys), but each brings
+their own LLM key, so their usage is billed to their own provider account.
 
 ## Troubleshooting
 
@@ -131,6 +149,6 @@ the daily token budget per tenant protect those limits.
 | Build fails | Read the Space's **Logs → Build**; usually a network error, so rebuild |
 | Page loads, "That API key was not accepted" | Key not in `RAG_API_KEYS_JSON`, or the secret has a typo; check the Space restarted after you saved it |
 | `/health/ready` returns 503 "database is unavailable" | `DATABASE_URL` is wrong, or you used the pooled endpoint; use the direct one with `?sslmode=require` |
-| Answers marked "fallback answer" | Groq rejected the call: wrong key or model ID, or a rate limit. The Logs show `provider … failed` with the reason |
+| Answers marked "fallback answer" | The user's provider rejected the call; the reason is shown under the answer (wrong key, wrong model ID, or the provider's rate limit). **Test** in the Model panel checks the settings |
 | First request very slow | The Space or Neon was asleep; later requests are fast |
 | Upload fails with "has no text" | Scanned PDFs have no text layer (no OCR yet) |

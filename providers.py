@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib import request
@@ -30,6 +30,8 @@ REWRITE_PROMPT = (
     "pronouns and references using the conversation. Reply with the query only."
 )
 
+USER_AGENT = "production-rag/1.0 (+https://github.com/sidAndroid01/production-rag)"
+
 CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
@@ -49,6 +51,8 @@ class Generation:
     completion_tokens: int = 0
     degraded: bool = False
     cost_usd: float = 0.0
+    # Why a fallback was used, safe to show the user (never contains a key).
+    note: str | None = None
 
 
 def estimate_tokens(text: str) -> int:
@@ -138,6 +142,16 @@ class ExtractiveProvider(ModelProvider):
         return f"Based on the indexed sources: {cited}"
 
 
+class _RefuseRedirects(request.HTTPRedirectHandler):
+    """A model API has no reason to redirect; following one could reach internal hosts."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_NO_REDIRECTS = request.build_opener(_RefuseRedirects)
+
+
 class OpenAICompatibleProvider(ModelProvider):
     """Works with OpenAI, Ollama, vLLM, LM Studio, and compatible gateways."""
 
@@ -148,8 +162,11 @@ class OpenAICompatibleProvider(ModelProvider):
         model: str,
         timeout: float = 30.0,
         max_output_tokens: int = 512,
+        url_guard: Callable[[str], None] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # Re-checked before every call for user-supplied URLs (see byok.py).
+        self.url_guard = url_guard
         self.api_key = api_key
         self.model = model
         self.name = model
@@ -183,10 +200,14 @@ class OpenAICompatibleProvider(ModelProvider):
             headers={
                 "content-type": "application/json",
                 "authorization": f"Bearer {self.api_key}",
+                # Some providers' CDNs (e.g. Groq's) block Python's default user agent.
+                "user-agent": USER_AGENT,
             },
             method="POST",
         )
-        with request.urlopen(req, timeout=self.timeout) as response:
+        if self.url_guard is not None:
+            self.url_guard(self.base_url)
+        with _NO_REDIRECTS.open(req, timeout=self.timeout) as response:
             body: dict[str, Any] = json.loads(response.read())
         return body
 

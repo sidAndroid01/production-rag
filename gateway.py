@@ -101,6 +101,27 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     return None
 
 
+def describe_failure(exc: BaseException) -> str:
+    """A short reason fit to show the user. It never includes request headers (keys)."""
+    if isinstance(exc, error.HTTPError):
+        # Fixed wording only: raw provider errors can quote part of the key.
+        hints = {
+            400: "request rejected; check the API key and model ID",
+            401: "the provider rejected the API key",
+            403: "the API key is not allowed to use this model",
+            404: "model or endpoint not found; check the model ID",
+            429: "rate limit or quota reached at the provider",
+        }
+        return f"HTTP {exc.code} ({hints.get(exc.code, 'provider error')})"
+    if isinstance(exc, TimeoutError | socket.timeout):
+        return "the provider did not answer in time"
+    if isinstance(exc, error.URLError):
+        return "could not reach the provider"
+    if isinstance(exc, ValueError):
+        return str(exc)  # e.g. a custom URL that failed the public-address check
+    return "unexpected response from the provider"
+
+
 @dataclass(frozen=True, slots=True)
 class Budget:
     """Token limits applied before a provider is called."""
@@ -189,16 +210,23 @@ class GatewayProvider(ModelProvider):
         packed = self.budget.pack_context(context)
         trimmed = self.budget.trim_history(history)
         deadline = self._clock() + self.deadline
+        notes: list[str] = []
         for provider in self.providers:
             breaker = self.breakers[provider.name]
             if not breaker.allow():
                 logger.warning("skipping %s: circuit %s", provider.name, breaker.state)
+                notes.append(f"{provider.name} is temporarily disabled after repeated failures")
                 continue
-            generation = self._attempt(provider, breaker, question, packed, trimmed, deadline)
+            generation, failure = self._attempt(
+                provider, breaker, question, packed, trimmed, deadline
+            )
             if generation is not None:
                 return self._priced(generation)
+            if failure:
+                notes.append(failure)
         logger.error("all model providers failed; answering extractively")
-        return replace(self.fallback.complete(question, packed, trimmed), degraded=True)
+        fallback = self.fallback.complete(question, packed, trimmed)
+        return replace(fallback, degraded=True, note="; ".join(notes) or None)
 
     def _attempt(
         self,
@@ -208,13 +236,16 @@ class GatewayProvider(ModelProvider):
         context: list[str],
         history: list[ChatTurn],
         deadline: float,
-    ) -> Generation | None:
+    ) -> tuple[Generation | None, str | None]:
+        """Try one provider with retries; return its answer or why it failed."""
+        failure: str | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
                 generation = provider.complete(question, context, history)
             except Exception as exc:
                 breaker.record_failure()
                 retryable = is_retryable(exc)
+                failure = f"{provider.name}: {describe_failure(exc)}"
                 logger.warning(
                     "provider %s attempt %d failed (%s, retryable=%s)",
                     provider.name,
@@ -223,18 +254,18 @@ class GatewayProvider(ModelProvider):
                     retryable,
                 )
                 if not retryable or attempt == self.max_attempts:
-                    return None
+                    return None, failure
                 delay = retry_after_seconds(exc)
                 if delay is None:
                     # Full jitter keeps many clients from retrying in lockstep.
                     delay = random.uniform(0, min(self.max_delay, self.base_delay * 2**attempt))
                 if self._clock() + delay >= deadline or not breaker.allow():
-                    return None
+                    return None, failure
                 self._sleep(delay)
             else:
                 breaker.record_success()
-                return generation
-        return None
+                return generation, None
+        return None, failure
 
     def _priced(self, generation: Generation) -> Generation:
         pricing = self.pricing.get(generation.model) or self.pricing.get("*")

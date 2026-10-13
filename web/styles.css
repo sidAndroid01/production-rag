@@ -34,6 +34,8 @@
 }
 
 * { box-sizing: border-box; }
+/* Layout rules below set display; never let them reveal hidden elements. */
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -208,3 +210,19 @@ details[open] { display: flex; flex-direction: column; gap: 6px; }
 .ask { display: flex; gap: 8px; align-items: flex-end; }
 .ask textarea { resize: vertical; min-height: 44px; }
 .typing { color: var(--muted); font-size: 13px; }
+
+.llm-panel {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; background: var(--surface-2);
+}
+.llm-panel .hint { margin: 0; }
+.llm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.llm-grid label { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
+.llm-wide { grid-column: 1 / -1; }
+@media (max-width: 820px) { .llm-grid { grid-template-columns: 1fr; } }
+select {
+  font: inherit; color: inherit; width: 100%;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface);
+}
+#llm-toggle.own { color: var(--accent); border-color: var(--accent); }
