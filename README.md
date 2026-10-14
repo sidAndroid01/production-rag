@@ -2,9 +2,11 @@
 
 A multi-tenant retrieval-augmented generation API, built in visible phases so every production concern is added, explained, and tested one at a time. It runs on PostgreSQL + pgvector with local embeddings, hybrid retrieval, row-level tenant security, group ACLs, grounded and cited answers, a resilient model gateway, versioned PDF/HTML/Markdown documents, a durable job queue, an evaluation gate in CI, and structured logs and metrics.
 
-![RAG Console: a chat answered by a local llama3 model, with each claim linked to its cited source passage](docs/assets/rag-console.jpg)
+[![RAG Console: questions about a travel policy answered by a local llama3 model, each answer citing the passage it came from](docs/assets/rag-console.jpg)](docs/assets/rag-console-walkthrough.mp4)
 
-*The built-in console at `http://localhost:8000`, running the full Docker stack (PostgreSQL + pgvector) with a local Ollama `llama3` model. Answers cite their sources; the follow-up question was rewritten into a standalone search ("searched: …"), and each answer shows its model, tokens, latency, and request ID.*
+**▶ [Watch the one-minute walkthrough](docs/assets/rag-console-walkthrough.mp4)**: connect with an access key, add a document, ask questions, check the cited passage, ask a follow-up, see an unanswerable question declined, and choose which AI writes the answers.
+
+*The built-in console at `http://localhost:8000`, running the full Docker stack with a local Ollama `llama3` model. Each answer cites its source and shows which model wrote it, tokens, latency, and request ID. The follow-up "And for meals?" was searched as a standalone question ("searched: …").*
 
 ## Quick start
 
@@ -18,7 +20,7 @@ curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
   -d '{"question": "How long do I have to get a refund?"}'
 ```
 
-To put it online for free, follow [Deploy: Hugging Face Spaces + Neon](docs/deploy-huggingface.md). Each user brings their own LLM key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom OpenAI-compatible URL) under **Model** in the console; it stays in their browser and is never stored by the server.
+To put it online for free, follow [Deploy: Hugging Face Spaces + Neon](docs/deploy-huggingface.md). Each user brings their own LLM key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom OpenAI-compatible URL) under **AI: Built-in → My own AI account** in the console; it stays in their browser and is never stored by the server.
 
 Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
 
@@ -644,7 +646,7 @@ Still to come (see the lifecycle notes in the roadmap): chunk-level diffs with a
 
 ## Phase 20: bring your own LLM key
 
-A public deployment should not answer everyone's questions on the owner's LLM account. Each user can now use **their own** provider and key, chosen under **Model** in the console:
+A public deployment should not answer everyone's questions on the owner's LLM account. Each user can now use **their own** provider and key, chosen in the console under **AI: Built-in → My own AI account**:
 
 ```text
 browser (key in sessionStorage, or localStorage if "remember")
@@ -656,7 +658,7 @@ browser (key in sessionStorage, or localStorage if "remember")
 - **Providers:** presets for Groq, OpenAI, OpenRouter, Google Gemini, Together AI and Mistral (fixed base URLs), plus a custom OpenAI-compatible URL ([`byok.py`](byok.py)).
 - **The server never keeps the key.** It arrives with each question, is used for that request, and is not stored, logged, or returned. `LlmSettings` hides it even from its own `repr`, and a test checks that it appears in no log record. Errors use fixed wording, because some providers' error messages quote part of the key.
 - **Custom URLs cannot reach internal systems.** Because the *server* makes the call, a user-typed URL could otherwise point at the cloud metadata service or the database. They must be `https`, every address the host resolves to must be public (checked again before each call), credentials in URLs are refused, and redirects are never followed. `RAG_ALLOW_CUSTOM_LLM_URL=0` allows only the presets. A narrow DNS-rebinding window between the check and the connection remains.
-- **Failures are explained.** A rejected key, unknown model, or provider rate limit produces a cited fallback answer with a note such as "HTTP 401 (the provider rejected the API key)". `POST /v1/llm/test` makes one tiny call so the console's **Test** button can check settings before saving.
+- **Failures are explained.** A rejected key, unknown model, or provider rate limit produces a cited fallback answer with a note such as "HTTP 401 (the provider rejected the API key)". `POST /v1/llm/test` makes one tiny call so the console's **Save** button checks a key before switching to it.
 - **Cost is the user's.** The server's daily token budget applies only to the server's own model; users' keys never count against it. Without any key, answers are cited quotes, so the app works without an LLM.
 
 Testing against the real providers found a bug no mock would have: Groq's CDN rejects Python's default `User-Agent` ("error code: 1010"), so even valid keys would have failed. Requests now send `production-rag/1.0`, and all six presets return proper authentication errors for an invalid key.

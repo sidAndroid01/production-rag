@@ -5,7 +5,7 @@ with the same console you use locally. No credit card is needed.
 
 **You do not pay for anyone's LLM usage.** Each person enters their own provider
 key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom
-OpenAI-compatible URL) under **Model** in the console. The key stays in their
+OpenAI-compatible URL) in the console under **AI: Built-in → My own AI account**. The key stays in their
 browser and is used only for their own questions. People without a key still get
 cited answers, written as quotes from the documents.
 
@@ -56,12 +56,13 @@ Run `migrate.py` the same way after pulling new code that adds migrations.
 
 Leave `RAG_MODEL_*` unset. Each user brings their own key in the console:
 
-1. They open **Model: server default** above the chat, choose a provider, and paste
-   their key. **Get a key** links to that provider's key page (Groq's free tier is a
-   good default: <https://console.groq.com/keys>).
-2. **Test** makes one tiny call and reports clearly if the key or model is wrong.
-3. **Save** keeps the key in this browser tab only, or on this device when
-   "Remember on this device" is ticked. **Use server default** removes it.
+1. They click **AI: Built-in** above the chat, choose **My own AI account**, pick a
+   provider, and paste their key. **(get one)** links to that provider's key page
+   (Groq's free tier is a good default: <https://console.groq.com/keys>).
+2. **Save** first makes one tiny call with the key and switches to it only if it
+   works; otherwise it says why (wrong key, unknown model, rate limit).
+3. The key is kept in this browser tab only, or on this device when "Remember my
+   key on this device" is ticked. Choosing **Built-in** and **Save** removes it.
 
 What happens to the key: it is sent with each question over HTTPS, used for that
 one request, and never stored, logged, or returned by the server. Passages from
@@ -125,8 +126,8 @@ The script sends only files committed to Git (never `.env` or `secrets/`). The S
 then builds the Docker image, which takes a few minutes the first time (follow the
 **Logs** tab). When it shows **Running**, open
 `https://<hf-username>-production-rag.hf.space`, paste your key, and click **Connect**.
-The top bar should read `postgres · server model: extractive`. Open **Model**,
-choose your provider, paste your key, **Test**, then **Save**.
+The top bar should read `Tenant … · user … · saved in database`. Click **AI: Built-in**,
+choose **My own AI account**, pick your provider, paste your key, and **Save**.
 
 To deploy new code: commit it, run the script again.
 
@@ -149,6 +150,6 @@ their own LLM key, so their usage is billed to their own provider account.
 | Build fails | Read the Space's **Logs → Build**; usually a network error, so rebuild |
 | Page loads, "That API key was not accepted" | Key not in `RAG_API_KEYS_JSON`, or the secret has a typo; check the Space restarted after you saved it |
 | `/health/ready` returns 503 "database is unavailable" | `DATABASE_URL` is wrong, or you used the pooled endpoint; use the direct one with `?sslmode=require` |
-| Answers marked "fallback answer" | The user's provider rejected the call; the reason is shown under the answer (wrong key, wrong model ID, or the provider's rate limit). **Test** in the Model panel checks the settings |
+| Answers marked "fallback answer" | The user's provider rejected the call; the reason is shown under the answer (wrong key, wrong model ID, or the provider's rate limit). **Save** in the AI panel re-checks the settings |
 | First request very slow | The Space or Neon was asleep; later requests are fast |
 | Upload fails with "has no text" | Scanned PDFs have no text layer (no OCR yet) |
