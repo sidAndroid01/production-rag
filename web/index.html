@@ -15,11 +15,11 @@
       <span>RAG Console</span>
     </div>
     <form id="key-form" class="key-form" autocomplete="off">
-      <label for="api-key" class="visually-hidden">API key</label>
-      <input id="api-key" type="password" placeholder="API key" spellcheck="false">
+      <label for="api-key" class="visually-hidden">Access key</label>
+      <input id="api-key" type="password" placeholder="Access key (from whoever runs this site)" spellcheck="false">
       <button type="submit">Connect</button>
     </form>
-    <div id="identity" class="identity" aria-live="polite">Not connected</div>
+    <div id="identity" class="identity" aria-live="polite">Not connected. Paste your access key to open your documents.</div>
   </header>
 
   <main class="layout">
@@ -41,14 +41,17 @@
           <input id="paste-name" type="text" placeholder="filename (optional), e.g. notes.md">
           <textarea id="paste-text" rows="4" placeholder="Document text"></textarea>
         </details>
-        <div class="row">
-          <input id="groups" type="text" placeholder="Restrict to groups (optional, comma-separated)">
-        </div>
-        <div class="row">
-          <input id="source-id" type="text" placeholder="Document ID (optional): reuse to upload a new version">
-        </div>
-        <div class="row between">
-          <label class="toggle"><input id="as-job" type="checkbox"> Ingest in background</label>
+        <details class="more">
+          <summary>More options</summary>
+          <label>Who can see it
+            <input id="groups" type="text" placeholder="Everyone with your access key (or list groups: hr, finance)">
+          </label>
+          <label>Replaces document
+            <input id="source-id" type="text" placeholder="Document ID, to upload a new version of an existing document">
+          </label>
+          <label class="toggle"><input id="as-job" type="checkbox"> Process in the background (large files do this automatically)</label>
+        </details>
+        <div class="row end">
           <button id="upload-btn" type="submit" disabled>Upload</button>
         </div>
         <p id="upload-hint" class="hint"></p>
@@ -62,41 +65,42 @@
     <section class="panel chat" aria-labelledby="chat-title">
       <div class="panel-head">
         <h2 id="chat-title">Ask</h2>
-        <div class="mode" role="radiogroup" aria-label="Mode">
-          <label><input type="radio" name="mode" value="chat" checked> Chat</label>
-          <label><input type="radio" name="mode" value="query"> Single question</label>
-        </div>
-        <button id="llm-toggle" class="ghost" type="button" aria-expanded="false" aria-controls="llm-panel">Model: server default</button>
-        <button id="new-chat" class="ghost" type="button">New chat</button>
+        <button id="llm-toggle" class="ghost" type="button" aria-expanded="false" aria-controls="llm-panel">AI: Built-in</button>
+        <button id="new-chat" class="ghost" type="button" title="Start a conversation that does not remember earlier questions">New chat</button>
       </div>
 
       <form id="llm-panel" class="llm-panel" hidden>
-        <p class="hint">Use your own LLM account. Your key stays in this browser and is sent only with your questions; the server uses it for that request and never stores or logs it.</p>
-        <div class="llm-grid">
+        <h3>Which AI writes your answers?</h3>
+        <label class="choice">
+          <input type="radio" name="llm-choice" value="builtin" checked>
+          <span><strong>Built-in</strong> <span class="hint" id="llm-builtin-desc">the site's own setup</span></span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="llm-choice" value="own">
+          <span><strong>My own AI account</strong> <span class="hint">paste a key from Groq, OpenAI, Gemini…; you pay for your own usage</span></span>
+        </label>
+
+        <div id="llm-own" class="llm-grid" hidden>
           <label>Provider
-            <select id="llm-provider"><option value="">Server default</option></select>
+            <select id="llm-provider"></select>
           </label>
           <label>Model
             <input id="llm-model" type="text" list="llm-models" placeholder="model ID" spellcheck="false">
             <datalist id="llm-models"></datalist>
           </label>
-          <label class="llm-wide" id="llm-url-row" hidden>Base URL (OpenAI-compatible, public https)
+          <label class="llm-wide" id="llm-url-row" hidden>Address (OpenAI-compatible, must be public https)
             <input id="llm-url" type="url" placeholder="https://ollama.example.com/v1" spellcheck="false">
           </label>
-          <label class="llm-wide">API key
-            <input id="llm-key" type="password" placeholder="your provider API key" autocomplete="off" spellcheck="false">
+          <label class="llm-wide"><span>Your API key <a id="llm-key-link" target="_blank" rel="noopener noreferrer" hidden>(get one)</a></span>
+            <input id="llm-key" type="password" placeholder="paste your key" autocomplete="off" spellcheck="false">
           </label>
+          <label class="toggle llm-wide"><input id="llm-remember" type="checkbox"> Remember my key on this device (otherwise it is forgotten when you close this tab)</label>
+          <p class="hint llm-wide">Your key stays in this browser. It is sent with your questions only and is never stored on the server.</p>
         </div>
-        <div class="row between">
-          <label class="toggle"><input id="llm-remember" type="checkbox"> Remember on this device</label>
-          <a id="llm-key-link" class="hint" target="_blank" rel="noopener noreferrer" hidden>Get a key</a>
-        </div>
-        <div class="row between">
-          <button id="llm-clear" class="ghost" type="button">Use server default</button>
-          <span class="row">
-            <button id="llm-test" class="ghost" type="button">Test</button>
-            <button type="submit">Save</button>
-          </span>
+
+        <div class="row end">
+          <button id="llm-cancel" class="ghost" type="button">Cancel</button>
+          <button id="llm-save" type="submit">Save</button>
         </div>
         <p id="llm-status" class="status" aria-live="polite"></p>
       </form>

@@ -226,3 +226,18 @@ select {
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface);
 }
 #llm-toggle.own { color: var(--accent); border-color: var(--accent); }
+
+.row.end { justify-content: flex-end; }
+.llm-panel h3 { margin: 0; font-size: 15px; }
+.choice { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.choice:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.choice input { margin-top: 4px; }
+.choice .hint { display: block; }
+.llm-grid label a { margin-left: 6px; color: var(--accent); }
+details.more { display: flex; flex-direction: column; gap: 8px; }
+details.more[open] { padding-bottom: 4px; }
+details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.more label:not(.toggle) { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); margin-top: 6px; }
+details.more .toggle { margin-top: 6px; }
+.llm-grid label.toggle { flex-direction: row; align-items: center; gap: 8px; }

@@ -42,7 +42,7 @@ async function api(method, path, body) {
 
 function describeError(error) {
   if (!(error instanceof ApiError)) return "Could not reach the API. Is it running?";
-  if (error.status === 401) return "That API key was not accepted.";
+  if (error.status === 401) return "That access key was not accepted. Check it with whoever runs this site.";
   if (error.status === 429) return `${error.message}. Try again in ${error.retryAfter || "a few"} s.`;
   return `${error.message} (HTTP ${error.status})`;
 }
@@ -69,9 +69,9 @@ async function connect() {
       "Tenant ", el("strong", "", me.tenant_id),
       " · user ", el("strong", "", me.user_id),
       me.groups.length ? ` · groups ${me.groups.join(", ")}` : "",
-      ` · ${me.storage} · server model: ${me.model}`,
+      ` · ${me.storage === "postgres" ? "saved in database" : "in memory (lost on restart)"}`,
     );
-    setupLlmOptions(me.llm);
+    setupLlmOptions(me.llm, me.model);
     await refreshDocuments();
   } catch (error) {
     state.connected = false;
@@ -91,7 +91,7 @@ function updateButtons() {
   $("ask-btn").disabled = !state.connected || !$("question").value.trim();
   // Say why Upload is unavailable instead of leaving a silently disabled button.
   const hint = $("upload-hint");
-  if (!state.connected) hint.textContent = "Connect with your API key first.";
+  if (!state.connected) hint.textContent = "Connect with your access key first (top of the page).";
   else if (!hasContent) hint.textContent = "Choose a file or paste some text.";
   else hint.textContent = "";
 }
@@ -265,10 +265,6 @@ async function followJob(jobId, name) {
 
 // ---------------------------------------------------------------- chat
 
-function mode() {
-  return document.querySelector('input[name="mode"]:checked').value;
-}
-
 function addMessage(role, text, className = "") {
   $("messages").querySelector(".welcome")?.remove();
   const message = el("div", `msg ${role} ${className}`.trim());
@@ -329,14 +325,14 @@ function renderMeta(result) {
   const meta = el("div", "meta");
   const generation = result.generation;
   if (generation) {
-    meta.append(el("span", "", `model ${generation.model}`));
+    meta.append(el("span", "", generation.model === "extractive" ? "quoted from your documents" : `written by ${generation.model}`));
     if (generation.prompt_tokens || generation.completion_tokens) {
       meta.append(el("span", "", `${generation.prompt_tokens + generation.completion_tokens} tokens`));
     }
     if (generation.cost_usd) meta.append(el("span", "", `$${generation.cost_usd.toFixed(5)}`));
-    if (generation.own_key) meta.append(el("span", "badge", "your key"));
+    if (generation.own_key) meta.append(el("span", "badge", "your account"));
     if (generation.degraded) {
-      const badge = el("span", "badge warn", "fallback answer");
+      const badge = el("span", "badge warn", "AI unavailable, showing quotes");
       if (generation.note) badge.title = generation.note;
       meta.append(badge);
       if (generation.note) meta.append(el("span", "", generation.note));
@@ -356,11 +352,11 @@ async function ask(event) {
   updateButtons();
   addMessage("user", question);
   const pending = addMessage("assistant", "Thinking…", "typing");
-  const isChat = mode() === "chat";
   try {
-    const body = isChat ? { question, session_id: state.session } : { question };
+    // Every question is part of the current conversation; "New chat" starts over.
+    const body = { question, session_id: state.session };
     if (state.llm) body.llm = state.llm;
-    const result = await api("POST", isChat ? "/v1/chat" : "/v1/query", body);
+    const result = await api("POST", "/v1/chat", body);
     pending.classList.remove("typing");
     if (!result.grounded) pending.classList.add("abstain");
     const sources = renderSources(result.citations);
@@ -377,16 +373,18 @@ async function ask(event) {
 function newChat() {
   state.session = crypto.randomUUID();
   const welcome = el("div", "welcome");
-  welcome.append(el("p", "", "New conversation started."));
+  welcome.append(el("p", "", "New conversation. Earlier questions are forgotten."));
   $("messages").replaceChildren(welcome);
 }
 
-// ---------------------------------------------------------------- your LLM
-// The user's provider settings live only in this browser: sessionStorage by
-// default, localStorage when they choose "Remember on this device".
+// ---------------------------------------------------------------- which AI answers
+// One choice: the site's built-in setup, or the user's own AI account. The
+// user's key lives only in this browser (sessionStorage, or localStorage when
+// they tick "remember") and is sent with their questions.
 
 const LLM_STORE = "rag-llm";
 let llmPresets = { providers: [], custom_allowed: false };
+let builtinModel = "extractive";
 
 function storage(remember) {
   try {
@@ -416,30 +414,56 @@ function saveLlm(settings, remember) {
   try { storage(remember)?.setItem(LLM_STORE, JSON.stringify(settings)); } catch { /* ignore */ }
 }
 
-function setupLlmOptions(presets) {
+function describeBuiltin() {
+  // "llama3 → extractive" means llama3, with quotes as the fallback.
+  const first = builtinModel.split("→")[0].trim();
+  return first === "extractive"
+    ? "free · answers are quotes from your documents, not written by an AI"
+    : `free · answers written by ${first}, set up by the site owner`;
+}
+
+function setupLlmOptions(presets, serverModel) {
   llmPresets = presets || llmPresets;
+  builtinModel = serverModel || builtinModel;
+  $("llm-builtin-desc").textContent = describeBuiltin();
   const select = $("llm-provider");
-  select.replaceChildren(new Option("Server default", ""));
+  select.replaceChildren();
   for (const provider of llmPresets.providers) select.append(new Option(provider.label, provider.id));
-  if (llmPresets.custom_allowed) select.append(new Option("Custom URL (OpenAI-compatible)", "custom"));
-  fillLlmForm(state.llm);
+  if (llmPresets.custom_allowed) select.append(new Option("Other (OpenAI-compatible address)", "custom"));
+  fillLlmForm();
   showLlmChoice();
 }
 
-function fillLlmForm(settings) {
-  $("llm-provider").value = settings ? settings.provider : "";
-  $("llm-model").value = settings ? settings.model : "";
-  $("llm-key").value = settings ? settings.api_key : "";
-  $("llm-url").value = settings && settings.base_url ? settings.base_url : "";
+function choice() {
+  return document.querySelector('input[name="llm-choice"]:checked').value;
+}
+
+function fillLlmForm() {
+  const settings = state.llm;
+  document.querySelector(`input[name="llm-choice"][value="${settings ? "own" : "builtin"}"]`).checked = true;
+  if (settings) {
+    $("llm-provider").value = settings.provider;
+    $("llm-model").value = settings.model;
+    $("llm-key").value = settings.api_key;
+    $("llm-url").value = settings.base_url || "";
+  } else {
+    $("llm-key").value = "";
+  }
   $("llm-remember").checked = Boolean(settings && state.llmRemember);
-  onProviderChange(false);
+  onProviderChange(!settings);
+  onChoiceChange();
+}
+
+function onChoiceChange() {
+  $("llm-own").hidden = choice() !== "own";
+  setLlmStatus("");
 }
 
 function onProviderChange(resetModel = true) {
   const id = $("llm-provider").value;
   const preset = llmPresets.providers.find((p) => p.id === id);
   $("llm-models").replaceChildren(...(preset ? preset.models.map((m) => new Option(m, m)) : []));
-  if (resetModel && preset) $("llm-model").value = preset.models[0] || "";
+  if (resetModel) $("llm-model").value = preset ? preset.models[0] || "" : "";
   $("llm-url-row").hidden = id !== "custom";
   const link = $("llm-key-link");
   link.hidden = !preset;
@@ -447,20 +471,24 @@ function onProviderChange(resetModel = true) {
 }
 
 function readLlmForm() {
-  const provider = $("llm-provider").value;
-  if (!provider) return null;
   const settings = {
-    provider,
+    provider: $("llm-provider").value,
     model: $("llm-model").value.trim(),
     api_key: $("llm-key").value.trim(),
   };
-  if (provider === "custom") settings.base_url = $("llm-url").value.trim();
+  if (settings.provider === "custom") settings.base_url = $("llm-url").value.trim();
   return settings;
 }
 
 function showLlmChoice() {
   const button = $("llm-toggle");
-  button.textContent = state.llm ? `Model: your ${state.llm.provider} · ${state.llm.model}` : "Model: server default";
+  if (state.llm) {
+    const preset = llmPresets.providers.find((p) => p.id === state.llm.provider);
+    const label = preset ? preset.label : "your AI";
+    button.textContent = `AI: your ${label} · ${state.llm.model}`;
+  } else {
+    button.textContent = "AI: Built-in";
+  }
   button.classList.toggle("own", Boolean(state.llm));
 }
 
@@ -469,39 +497,43 @@ function setLlmStatus(text, kind = "") {
   $("llm-status").className = `status ${kind}`;
 }
 
-async function testLlm() {
+function closeLlmPanel() {
+  $("llm-panel").hidden = true;
+  $("llm-toggle").setAttribute("aria-expanded", "false");
+}
+
+// Save always checks the key first, so a broken key is never silently in use.
+async function saveLlmForm(event) {
+  event.preventDefault();
+  if (choice() === "builtin") {
+    state.llm = null;
+    saveLlm(null, false);
+    showLlmChoice();
+    $("llm-key").value = "";
+    setLlmStatus("");
+    closeLlmPanel();
+    return;
+  }
   const settings = readLlmForm();
-  if (!settings) return setLlmStatus("Choose a provider first.", "error");
-  setLlmStatus("Testing…");
+  if (!settings.model || !settings.api_key || (settings.provider === "custom" && !settings.base_url)) {
+    return setLlmStatus("Fill in the model and your API key.", "error");
+  }
+  setLlmStatus("Checking your key…");
+  $("llm-save").disabled = true;
   try {
     const result = await api("POST", "/v1/llm/test", { llm: settings });
-    if (result.ok) setLlmStatus(`Works: ${result.model} answered in ${result.latency_ms} ms.`, "ok");
-    else setLlmStatus(`Not working: ${result.error}`, "error");
+    if (!result.ok) return setLlmStatus(`That did not work: ${result.error}`, "error");
+    const remember = $("llm-remember").checked;
+    state.llm = settings;
+    state.llmRemember = remember;
+    saveLlm({ ...settings, remember }, remember);
+    showLlmChoice();
+    setLlmStatus(`Works (${result.latency_ms} ms). Your questions now use your account.`, "ok");
   } catch (error) {
     setLlmStatus(describeError(error), "error");
+  } finally {
+    $("llm-save").disabled = false;
   }
-}
-
-function saveLlmForm(event) {
-  event.preventDefault();
-  const settings = readLlmForm();
-  if (settings && (!settings.model || !settings.api_key)) {
-    return setLlmStatus("Model and API key are required.", "error");
-  }
-  const remember = $("llm-remember").checked;
-  state.llm = settings;
-  state.llmRemember = remember;
-  saveLlm(settings ? { ...settings, remember } : null, remember);
-  showLlmChoice();
-  setLlmStatus(settings ? "Saved. Your questions now use your model." : "Using the server default.", "ok");
-}
-
-function clearLlm() {
-  state.llm = null;
-  saveLlm(null, false);
-  fillLlmForm(null);
-  showLlmChoice();
-  setLlmStatus("Your key was removed from this browser. Using the server default.", "ok");
 }
 
 // ---------------------------------------------------------------- wiring
@@ -515,13 +547,16 @@ function init() {
   }
   $("llm-toggle").addEventListener("click", () => {
     const panel = $("llm-panel");
+    if (panel.hidden) fillLlmForm();
     panel.hidden = !panel.hidden;
     $("llm-toggle").setAttribute("aria-expanded", String(!panel.hidden));
   });
+  for (const radio of document.querySelectorAll('input[name="llm-choice"]')) {
+    radio.addEventListener("change", onChoiceChange);
+  }
   $("llm-provider").addEventListener("change", () => onProviderChange(true));
   $("llm-panel").addEventListener("submit", saveLlmForm);
-  $("llm-test").addEventListener("click", testLlm);
-  $("llm-clear").addEventListener("click", clearLlm);
+  $("llm-cancel").addEventListener("click", closeLlmPanel);
   showLlmChoice();
   $("api-key").value = state.key;
   $("key-form").addEventListener("submit", (event) => { event.preventDefault(); connect(); });
