@@ -4,6 +4,10 @@ A multi-tenant retrieval-augmented generation API, built in visible phases so ev
 
 [![RAG Console: questions about a travel policy answered by a local llama3 model, each answer citing the passage it came from](docs/assets/rag-console.jpg)](docs/assets/rag-console-walkthrough.mp4)
 
+# More videos
+https://github.com/user-attachments/assets/19a2cba2-9c8a-49a0-9b1d-f116771a522e
+
+
 **▶ [Watch the one-minute walkthrough](docs/assets/rag-console-walkthrough.mp4)**: connect with an access key, add a document, ask questions, check the cited passage, ask a follow-up, see an unanswerable question declined, and choose which AI writes the answers.
 
 *The built-in console at `http://localhost:8000`, running the full Docker stack with a local Ollama `llama3` model. Each answer cites its source and shows which model wrote it, tokens, latency, and request ID. The follow-up "And for meals?" was searched as a standalone question ("searched: …").*
