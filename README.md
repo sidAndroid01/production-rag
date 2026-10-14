@@ -453,7 +453,11 @@ question → validate
 
 - [`providers.py`](providers.py) owns the grounded-answer contract: the system prompt holds only rules; sources travel as delimited data in the user turn, and delimiter look-alikes inside documents are neutralized. `cited_sources()` and `strip_invalid_citations()` turn `[n]` markers into the response's `citations`, each with a `source_number` that matches the marker in the text.
 - An answer with no valid citation is replaced by the standard abstention and reported as `grounded: false`. A fluent but uncited answer is treated as unsupported.
-- `rewrite_query()` resolves follow-ups before retrieval. The OpenAI-compatible provider asks the model; the extractive provider (and the model path, if that call fails) prepends the previous user question. Chat responses include `search_query` when it differs from the question.
+- `rewrite_query()` resolves follow-ups before retrieval; standalone questions are searched as asked. The OpenAI-compatible provider asks the model; the extractive provider (and the model path, if that call fails) prepends the previous user question. Chat responses include `search_query` when it differs from the question.
+- Lessons from a small local model (llama3 8B), each with a regression test:
+  - Earlier turns are sent as text after the sources ("Earlier conversation, only to understand the question"), not as separate chat turns. Given separate turns, the model declined new questions whose sources were plainly supplied.
+  - Declined exchanges are left out of that history (the model copied the refusal), and old `[n]` markers are removed (they pointed at an earlier turn's sources).
+  - An answer with no citations gets one follow-up request to add them. Correct but uncited answers ("a 2X-3X speedup") are rescued; an unsupported answer stays uncited, or becomes the refusal, and is still rejected.
 - [`reranker.py`](reranker.py) passes cross-encoder logits through a sigmoid and keeps the fallback score within [0, 1], so one threshold means the same thing on both paths. A missing `sentence-transformers` is detected once instead of on every query.
 
 This is citation *alignment*, not entailment: the response now cites exactly what the answer claims to use, but whether each cited sentence supports its claim is measured in Phase 15's evaluation rather than verified per request.

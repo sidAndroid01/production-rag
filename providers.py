@@ -8,11 +8,14 @@ reported as ungrounded.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib import request
+
+logger = logging.getLogger("rag.providers")
 
 ABSTENTION = "I do not have enough evidence in the indexed documents to answer that."
 
@@ -28,6 +31,13 @@ SYSTEM_PROMPT = (
 REWRITE_PROMPT = (
     "Rewrite the user's latest question as one standalone search query, resolving "
     "pronouns and references using the conversation. Reply with the query only."
+)
+
+CITATION_REPAIR_PROMPT = (
+    "Rewrite your answer, adding the number of the supporting source in square "
+    "brackets after each claim, for example [1]. Use only the sources above. If "
+    f"they do not support the answer, reply exactly: {ABSTENTION} Reply with the "
+    "answer only."
 )
 
 USER_AGENT = "production-rag/1.0 (+https://github.com/sidAndroid01/production-rag)"
@@ -113,6 +123,26 @@ def heuristic_rewrite(question: str, history: Sequence[ChatTurn]) -> str:
     return question
 
 
+def history_for_model(history: Sequence[ChatTurn]) -> tuple[ChatTurn, ...]:
+    """The earlier turns a model should see when answering or rewriting.
+
+    Declined exchanges are left out: a small model shown "I do not have enough
+    evidence..." tends to repeat it for the next, answerable question (seen with
+    llama3 8B). Citation numbers are removed from earlier answers because they
+    pointed at that turn's sources, not the ones supplied now.
+    """
+    kept: list[ChatTurn] = []
+    for turn in history:
+        if turn.role == "assistant" and turn.content.strip() == ABSTENTION:
+            if kept and kept[-1].role == "user":
+                kept.pop()
+            continue
+        if turn.role == "assistant":
+            turn = ChatTurn("assistant", CITATION_RE.sub("", turn.content).strip())
+        kept.append(turn)
+    return tuple(kept)
+
+
 class ModelProvider:
     name = "provider"
 
@@ -177,13 +207,18 @@ class OpenAICompatibleProvider(ModelProvider):
         self, question: str, context: Sequence[str], history: Sequence[ChatTurn]
     ) -> list[dict[str, str]]:
         # Sources travel in the user turn, never the system prompt, so document
-        # text cannot acquire system-level authority.
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend({"role": turn.role, "content": turn.content} for turn in history)
-        messages.append(
-            {"role": "user", "content": f"{format_sources(context)}\n\nQuestion: {question}"}
-        )
-        return messages
+        # text cannot acquire system-level authority. Earlier turns go in the same
+        # message, after the sources, rather than as chat turns: given separate
+        # turns, llama3 8B declined new questions whose sources were plainly there.
+        parts = [format_sources(context)]
+        if history:
+            transcript = "\n".join(f"{turn.role}: {turn.content}" for turn in history)
+            parts.append(f"Earlier conversation, only to understand the question:\n{transcript}")
+        parts.append(f"Question: {question}")
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ]
 
     def _request(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         payload = json.dumps(
@@ -221,6 +256,29 @@ class OpenAICompatibleProvider(ModelProvider):
         self, question: str, context: Sequence[str], history: Sequence[ChatTurn]
     ) -> Generation:
         messages = self.build_messages(question, context, history)
+        generation = self._generation(messages)
+        text = generation.text
+        if context and text.strip() != ABSTENTION and not cited_sources(text, len(context)):
+            # Small models often answer correctly but forget the [n] markers, and
+            # an uncited answer is refused downstream. One request to add them
+            # rescues it; an answer the sources don't support stays uncited.
+            messages += [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": CITATION_REPAIR_PROMPT},
+            ]
+            try:
+                repaired = self._generation(messages)
+            except Exception:
+                logger.warning("citation repair failed; keeping the uncited answer")
+            else:
+                generation = replace(
+                    repaired,
+                    prompt_tokens=generation.prompt_tokens + repaired.prompt_tokens,
+                    completion_tokens=generation.completion_tokens + repaired.completion_tokens,
+                )
+        return generation
+
+    def _generation(self, messages: list[dict[str, str]]) -> Generation:
         body = self._request(messages)
         text = str(body["choices"][0]["message"]["content"])
         usage = body.get("usage") or {}
@@ -235,7 +293,9 @@ class OpenAICompatibleProvider(ModelProvider):
         )
 
     def rewrite_query(self, question: str, history: Sequence[ChatTurn]) -> str:
-        if not history:
+        # Standalone questions are searched as asked; rewriting them only adds a
+        # model call and risks drift (llama3 turned one into '"refund policy"').
+        if not history or not looks_like_follow_up(question):
             return question
         transcript = "\n".join(f"{turn.role}: {turn.content}" for turn in history[-6:])
         try:
@@ -250,4 +310,7 @@ class OpenAICompatibleProvider(ModelProvider):
             ).strip()
         except Exception:
             return heuristic_rewrite(question, history)
+        # Models sometimes wrap the query in quotes or add a second line.
+        lines = rewritten.splitlines()
+        rewritten = lines[0].strip().strip("\"'“”`").strip() if lines else ""
         return rewritten or question

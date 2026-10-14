@@ -51,6 +51,7 @@ from providers import (
     Generation,
     ModelProvider,
     cited_sources,
+    history_for_model,
     strip_invalid_citations,
 )
 from query import RagQueryPipeline, UnsafeQueryError
@@ -735,7 +736,7 @@ class RagApiApplication:
         prior: tuple[ChatTurn, ...] = ()
         if is_chat:
             assert isinstance(session_id, str)
-            prior = self.history.get(tenant_id, principal.user_id, session_id)
+            prior = history_for_model(self.history.get(tenant_id, principal.user_id, session_id))
         try:
             question = RagQueryPipeline(()).validate_query(question, tenant_id)
             # Follow-ups such as "and for contractors?" are rewritten into a
