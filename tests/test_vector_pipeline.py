@@ -258,3 +258,15 @@ def test_in_memory_document_delete_is_tenant_scoped() -> None:
     )
     assert status == 403
     assert denied["detail"] == "tenant_id does not match authenticated identity"
+
+
+def test_embedder_batching_and_threads_come_from_the_environment(monkeypatch):
+    default = LocalFastEmbedder.from_environment()
+    assert (default.batch_size, default._threads) == (32, None)
+    monkeypatch.setenv("RAG_EMBED_BATCH_SIZE", "4")
+    monkeypatch.setenv("RAG_EMBED_THREADS", "1")
+    small = LocalFastEmbedder.from_environment()
+    assert (small.batch_size, small._threads) == (4, 1)
+    monkeypatch.setenv("RAG_EMBED_BATCH_SIZE", "0")
+    with pytest.raises(ValueError):
+        LocalFastEmbedder.from_environment()

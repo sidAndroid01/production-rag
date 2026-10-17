@@ -24,7 +24,7 @@ curl -H "x-api-key: $RAG_API_KEY" localhost:8000/v1/query \
   -d '{"question": "How long do I have to get a refund?"}'
 ```
 
-To put it online for free, follow [Deploy: Hugging Face Spaces + Neon](docs/deploy-huggingface.md). Each user brings their own LLM key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom OpenAI-compatible URL) under **AI: Built-in → My own AI account** in the console; it stays in their browser and is never stored by the server.
+To put it online for free, follow [Deploy: Render + Neon](docs/deploy-render.md) (512 MB, no card; measured with every feature on). [Hugging Face Spaces + Neon](docs/deploy-huggingface.md) gives more memory, but new free accounts can currently get a `cpu-basic` quota of 0. Each user brings their own LLM key (Groq, OpenAI, OpenRouter, Gemini, Together, Mistral, or a custom OpenAI-compatible URL) under **AI: Built-in → My own AI account** in the console; it stays in their browser and is never stored by the server.
 
 Without Docker, `make install && make run` starts the in-memory demo; `make check` runs lint, types, and tests, and `make eval` runs the quality gate. Answers use a free extractive answerer until `RAG_MODEL_*` points at an OpenAI-compatible model (OpenAI, Ollama, vLLM, LM Studio).
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Sequence
 from typing import Any, Protocol
 
@@ -39,6 +40,17 @@ class LocalFastEmbedder:
         self._cache_dir = cache_dir
         self._threads = threads
         self._model: Any | None = None
+
+    @classmethod
+    def from_environment(cls) -> LocalFastEmbedder:
+        """Size the batches and CPU threads from the environment.
+
+        Both only trade speed for memory; the vectors are the same. Small hosts
+        (512 MB) need ``RAG_EMBED_BATCH_SIZE=4`` and ``RAG_EMBED_THREADS=1``.
+        """
+        batch_size = int(os.getenv("RAG_EMBED_BATCH_SIZE", "32"))
+        threads = os.getenv("RAG_EMBED_THREADS", "").strip()
+        return cls(batch_size=batch_size, threads=int(threads) if threads else None)
 
     def _load_model(self) -> Any:
         if self._model is None:

@@ -148,7 +148,9 @@ class RagApiApplication:
         self.max_body_bytes = max_body_bytes
         self.ingestion = RagIngestionPipeline()
         self.persistence = persistence
-        self.embedder = embedder or (LocalFastEmbedder() if persistence is not None else None)
+        self.embedder = embedder or (
+            LocalFastEmbedder.from_environment() if persistence is not None else None
+        )
         self.provider = provider or configured_provider()
         self.reranker = reranker or CrossEncoderReranker()
         self.history: ChatHistoryStore | PostgresChatHistory = (
