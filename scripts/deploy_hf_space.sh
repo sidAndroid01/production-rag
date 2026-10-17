@@ -36,8 +36,10 @@ cd "$work"
 git init -q -b main
 git add -A
 git -c user.name=deploy -c user.email=deploy@localhost commit -qm "Deploy $commit"
-# Send the token as a header so it never appears in a URL or the process list.
-git -c http.extraheader="Authorization: Bearer $HF_TOKEN" \
+# Send the token as a header so it never appears in a URL. Hugging Face's Git
+# server accepts the token only as a Basic-auth password (any username).
+auth="$(printf 'hf:%s' "$HF_TOKEN" | base64 | tr -d '\n')"
+git -c http.extraheader="Authorization: Basic $auth" \
   push --force --quiet "https://huggingface.co/spaces/$space" main
 echo "deployed $commit → https://huggingface.co/spaces/$space"
 echo "the Space builds for a few minutes; watch the Logs tab"
